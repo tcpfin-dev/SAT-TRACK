@@ -1,0 +1,7 @@
+# MAR20 YOLO OBB dataset config
+path: /root/satellite/MAR20/yolo_obb_dataset
+train: images/train
+val: images/val
+
+nc: 20
+names: ['SU-35', 'C-130', 'C-17', 'C-5', 'F-16', 'TU-160', 'E-3', 'B-52', 'P-3C', 'B-1B', 'E-8', 'TU-22', 'F-15', 'KC-135', 'F-22', 'F-A-18', 'TU-95', 'KC-10', 'SU-34', 'SU-24']

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Crush
+.crush/
+
+# Model weights (too large for GitHub)
+*.pt
+
+# YOLO training runs (keep val images for README, ignore weights + predictions)
+runs/obb/*/weights/
+runs/obb/predict/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
