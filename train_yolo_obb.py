@@ -5,21 +5,30 @@ Defaults to **YOLO26** (``yolo26n-obb.pt``) and targets only the YOLO26 OBB fami
 PASCAL-VOC OBB annotations to YOLO OBB format, (re)generates the dataset yaml with a path that is valid
 on *this* machine, and trains.
 
+``--model`` accepts three forms, and the checkpoint is fetched automatically when it is not on disk:
+
+    "yolo26n-obb.pt"          official Ultralytics asset name -> downloaded into ``weights/``
+    "https://.../some.pt"     downloaded straight from that URL
+    "weights/best.pt"         any local file, used as-is
+
 Usage:
     pip install ultralytics
     python train_yolo_obb.py                        # YOLO26n-OBB, 100 epochs
     python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200
     python train_yolo_obb.py --setup-only           # dataset only, no training
     python train_yolo_obb.py --no-setup             # train on existing dataset
+    python train_yolo_obb.py --model yolo26m-obb.pt --weights-dir /data/weights
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 ANNOTATIONS_DIR = BASE_DIR / "Annotations" / "Oriented Bounding Boxes"
@@ -27,6 +36,7 @@ IMAGES_DIR = BASE_DIR / "JPEGImages"
 IMAGESETS_DIR = BASE_DIR / "ImageSets" / "Main"
 DATASET_DIR = BASE_DIR / "yolo_obb_dataset"
 RUNS_DIR = BASE_DIR / "runs" / "obb"
+WEIGHTS_DIR = BASE_DIR / "weights"
 
 DEFAULT_MODEL = "yolo26n-obb.pt"
 
@@ -165,6 +175,93 @@ def default_run_name(model_name: str) -> str:
     return f"mar20_{stem}_train"
 
 
+MIN_PT_BYTES = 100_000  # anything smaller is a git-lfs pointer / truncated download
+
+
+def _checkpoint_candidates(src: str, weights_dir: Path = WEIGHTS_DIR) -> list[Path]:
+    """Local places a bare model name may already live, in search order."""
+    raw = Path(src).expanduser()
+    candidates = [raw, BASE_DIR / raw.name, Path(weights_dir) / raw.name]
+    return [p.resolve() for p in candidates]
+
+
+def resolve_model(src: str, weights_dir: Path = WEIGHTS_DIR, download: bool = True) -> Path:
+    """Resolve a model spec to a local ``.pt``, fetching the checkpoint when it is missing.
+
+    Accepts an official Ultralytics asset name (``yolo26n-obb.pt``), a direct URL, or a
+    local path. Returns the verified local path.
+    """
+    from ultralytics import YOLO
+    from ultralytics.utils.downloads import attempt_download_asset, safe_download
+
+    src = str(src).strip()
+    weights_dir = Path(weights_dir).expanduser().resolve()
+    # pathlib mangles "://" into ":/", so repair that form before anything else
+    if src.lower().startswith(("http:/", "https:/")) and "://" not in src:
+        src = src.replace(":/", "://", 1)
+    is_url = src.lower().startswith(("http://", "https://"))
+
+    if is_url:
+        name = unquote(urlparse(src).path).rsplit("/", 1)[-1] or "model.pt"
+        target = weights_dir / name
+        if target.is_file() and target.stat().st_size >= MIN_PT_BYTES:
+            print(f"Using cached checkpoint: {target}")
+        else:
+            if not download:
+                raise FileNotFoundError(f"{target} not found and --no-download was given")
+            weights_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Downloading {src}\n  -> {target}")
+            safe_download(url=src, file=str(target), min_bytes=1e5)
+        model_path = target
+    else:
+        existing = next(
+            (p for p in _checkpoint_candidates(src, weights_dir) if p.is_file()), None
+        )
+        if existing and existing.stat().st_size >= MIN_PT_BYTES:
+            model_path = existing
+            print(f"Using local checkpoint: {model_path}")
+        else:
+            name = Path(src).name
+            if not name.endswith(".pt"):
+                name = f"{name}-obb.pt"
+            target = weights_dir / name
+            if target.is_file() and target.stat().st_size >= MIN_PT_BYTES:
+                model_path = target
+                print(f"Using cached checkpoint: {model_path}")
+            else:
+                if not download:
+                    raise FileNotFoundError(
+                        f"No checkpoint '{name}' found in {BASE_DIR} or {weights_dir}, "
+                        "and --no-download was given."
+                    )
+                weights_dir.mkdir(parents=True, exist_ok=True)
+                print(f"Fetching Ultralytics asset '{name}' -> {target}")
+                # attempt_download_asset() returns quietly when the name is not a known
+                # asset, so the size check below is what actually proves the fetch worked.
+                attempt_download_asset(str(target))
+                model_path = target
+
+    if not model_path.is_file() or model_path.stat().st_size < MIN_PT_BYTES:
+        raise FileNotFoundError(
+            f"Checkpoint missing or truncated: {model_path}. Check the name against "
+            "https://github.com/ultralytics/assets/releases (it must be a *-obb.pt file), "
+            "or pass a direct URL with --model."
+        )
+
+    probe = YOLO(str(model_path))
+    if getattr(probe, "task", None) not in (None, "obb"):
+        raise ValueError(
+            f"{model_path.name} is a '{probe.task}' model - training needs an OBB checkpoint"
+        )
+    params = sum(p.numel() for p in getattr(probe.model, "parameters", lambda: [])())
+    sha = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    print(f"  task:   {probe.task}")
+    print(f"  params: {params / 1e6:.2f}M")
+    print(f"  size:   {model_path.stat().st_size / 1e6:.1f} MB")
+    print(f"  sha256: {sha}")
+    return model_path
+
+
 def train(
     model_name: str = DEFAULT_MODEL,
     epochs: int = 100,
@@ -177,13 +274,16 @@ def train(
     fraction: float = 1.0,
     workers: int = 4,
     extra: dict | None = None,
+    weights_dir: Path = WEIGHTS_DIR,
+    download: bool = True,
 ):
     from ultralytics import YOLO
 
     yaml_path = create_yaml()
 
-    model = YOLO(model_name)
-    run_name = name or default_run_name(model_name)
+    model_path = resolve_model(model_name, weights_dir=weights_dir, download=download)
+    model = YOLO(str(model_path))
+    run_name = name or default_run_name(model_path.name)
     model.train(
         data=str(yaml_path),
         epochs=epochs,
@@ -210,7 +310,12 @@ def train(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train YOLO OBB on MAR20 (YOLO26 by default).")
     p.add_argument("--model", default=DEFAULT_MODEL,
-                   help=f"Ultralytics YOLO26 OBB checkpoint (default: {DEFAULT_MODEL}).")
+                   help=f"Ultralytics YOLO26 OBB checkpoint: asset name, URL, or local .pt "
+                        f"(default: {DEFAULT_MODEL}; downloaded automatically if not found)")
+    p.add_argument("--weights-dir", default=str(WEIGHTS_DIR), type=Path,
+                   help=f"Where fetched checkpoints are stored (default: {WEIGHTS_DIR})")
+    p.add_argument("--no-download", action="store_true",
+                   help="Never fetch the checkpoint; fail if it is not already on disk")
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--batch", type=int, default=16)
@@ -268,6 +373,8 @@ def main(argv: list[str] | None = None) -> None:
         name=args.name,
         fraction=args.fraction,
         workers=args.workers,
+        weights_dir=args.weights_dir,
+        download=not args.no_download,
     )
 
 
