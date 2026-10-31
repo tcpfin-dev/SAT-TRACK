@@ -12,17 +12,10 @@ build/
 .venv/
 venv/
 
-# Notebook smoke artifacts
-.smoke_nb.ipynb
-.smoke_out.ipynb
-.ipynb_checkpoints/
-
-# Model weights (too large for GitHub)
+# Model weights (do not commit binaries; see "Cloud GPU training" in README)
 *.pt
 
-# Notebook-generated artifacts (yolo26n_obb_train_eval.ipynb)
-/results/
-/yolo26n_obb_results.zip
+# Downloaded checkpoints + generated dataset yaml
 /mar20_obb.yaml
 /weights/
 
