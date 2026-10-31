@@ -1,0 +1,2 @@
+# Core training / inference
+ultralytics>=8.4.100   # >=8.4 ships YOLO26 OBB checkpoints (yolo26*n-obb.pt)

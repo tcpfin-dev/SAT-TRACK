@@ -1,14 +1,21 @@
 """
-Train YOLO11-OBB on the MAR20 dataset.
+Train a YOLO oriented-bounding-box (OBB) detector on the MAR20 dataset.
 
-Converts PASCAL VOC oriented bounding box annotations to YOLO OBB format,
-sets up the dataset structure, and trains YOLO11-OBB.
+Defaults to **YOLO26** (``yolo26n-obb.pt``) and targets only the YOLO26 OBB family. The script converts
+PASCAL-VOC OBB annotations to YOLO OBB format, (re)generates the dataset yaml with a path that is valid
+on *this* machine, and trains.
 
 Usage:
     pip install ultralytics
-    python train_yolo_obb.py
+    python train_yolo_obb.py                        # YOLO26n-OBB, 100 epochs
+    python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200
+    python train_yolo_obb.py --setup-only           # dataset only, no training
+    python train_yolo_obb.py --no-setup             # train on existing dataset
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import shutil
 import xml.etree.ElementTree as ET
@@ -19,6 +26,9 @@ ANNOTATIONS_DIR = BASE_DIR / "Annotations" / "Oriented Bounding Boxes"
 IMAGES_DIR = BASE_DIR / "JPEGImages"
 IMAGESETS_DIR = BASE_DIR / "ImageSets" / "Main"
 DATASET_DIR = BASE_DIR / "yolo_obb_dataset"
+RUNS_DIR = BASE_DIR / "runs" / "obb"
+
+DEFAULT_MODEL = "yolo26n-obb.pt"
 
 CLASS_NAMES = [
     "SU-35", "C-130", "C-17", "C-5", "F-16",
@@ -79,8 +89,25 @@ def get_image_size(xml_path: Path, img_path: Path) -> tuple[int, int]:
         return im.size
 
 
+def raw_dataset_available() -> bool:
+    """True when the original MAR20 VOC-style tree is present and non-empty."""
+    return any(ANNOTATIONS_DIR.glob("*.xml")) and any(IMAGES_DIR.glob("*.jpg"))
+
+
+def dataset_available() -> bool:
+    """True when the converted YOLO OBB dataset is already on disk."""
+    return any((DATASET_DIR / "images" / "train").glob("*.jpg"))
+
+
 def setup_dataset() -> None:
     """Build YOLO OBB dataset directory structure from MAR20."""
+    if not raw_dataset_available():
+        raise FileNotFoundError(
+            f"Raw MAR20 not found ({ANNOTATIONS_DIR} / {IMAGES_DIR}). "
+            "Drop the original MAR20 tree next to this script, or point "
+            "--dataset at a pre-converted yolo_obb_dataset."
+        )
+
     train_ids = load_split("train")
     val_ids = load_split("test")
 
@@ -110,52 +137,139 @@ def setup_dataset() -> None:
     print(f"  Val images:   {len(list((DATASET_DIR / 'images' / 'val').glob('*.jpg')))}")
 
 
-def create_yaml() -> Path:
+def create_yaml(force: bool = True) -> Path:
+    """(Re)write the dataset yaml so its ``path`` is correct for this checkout."""
     yaml_path = DATASET_DIR / "mar20_obb.yaml"
-    content = f"""# MAR20 YOLO OBB dataset config
-path: {DATASET_DIR}
+    if yaml_path.exists() and not force:
+        return yaml_path
+
+    # POSIX-style path works on Linux/WSL; ultralytics accepts str paths as-is.
+    dataset_path = Path(os.path.abspath(DATASET_DIR)).as_posix()
+    content = f"""# MAR20 YOLO OBB dataset config (auto-generated — safe to regenerate)
+path: {dataset_path}
 train: images/train
 val: images/val
 
 nc: {len(CLASS_NAMES)}
 names: {CLASS_NAMES}
 """
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
     with open(yaml_path, "w") as f:
         f.write(content)
     return yaml_path
 
 
-def train() -> None:
+def default_run_name(model_name: str) -> str:
+    """e.g. yolo26n-obb.pt -> mar20_yolo26n_train"""
+    stem = Path(model_name).stem.replace("-obb", "")  # yolo26n
+    return f"mar20_{stem}_train"
+
+
+def train(
+    model_name: str = DEFAULT_MODEL,
+    epochs: int = 100,
+    imgsz: int = 640,
+    batch: int = 16,
+    device: str | int | None = 0,
+    patience: int = 20,
+    name: str | None = None,
+    project: Path = RUNS_DIR,
+    fraction: float = 1.0,
+    workers: int = 4,
+    extra: dict | None = None,
+):
     from ultralytics import YOLO
 
     yaml_path = create_yaml()
 
-    model = YOLO("yolo11n-obb.pt")
-    results = model.train(
+    model = YOLO(model_name)
+    run_name = name or default_run_name(model_name)
+    model.train(
         data=str(yaml_path),
-        epochs=100,
-        imgsz=640,
-        batch=16,
-        device=0,
-        patience=20,
+        epochs=epochs,
+        imgsz=imgsz,
+        batch=batch,
+        device=device,
+        patience=patience,
         save=True,
-        save_period=10,
-        project=str(BASE_DIR / "runs" / "obb"),
-        name="mar20_train",
+        save_period=10 if epochs >= 10 else 0,
+        fraction=fraction,
+        workers=workers,
+        project=str(project),
+        name=run_name,
         exist_ok=True,
+        **(extra or {}),
     )
-    print(f"\nTraining complete. Best model: {results.save_dir}")
+    # ultralytics sets .trainer during train(); prefer it over the results object
+    save_dir = Path(str(getattr(model.trainer, "save_dir", project / run_name)))
+    print(f"\nTraining complete. Run dir: {save_dir}")
+    print(f"Best weights: {save_dir / 'weights' / 'best.pt'}")
+    return save_dir
 
 
-if __name__ == "__main__":
-    import sys
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Train YOLO OBB on MAR20 (YOLO26 by default).")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"Ultralytics YOLO26 OBB checkpoint (default: {DEFAULT_MODEL}).")
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--imgsz", type=int, default=640)
+    p.add_argument("--batch", type=int, default=16)
+    p.add_argument("--device", default="0", help="'0'..'N' GPU, 'cpu', or 'mps'")
+    p.add_argument("--patience", type=int, default=20)
+    p.add_argument("--name", default=None, help="Run name (default: derived from --model)")
+    p.add_argument("--fraction", type=float, default=1.0, help="Fraction of training data")
+    p.add_argument("--workers", type=int, default=4,
+                   help="Dataloader workers (keep low on WSL/low-RAM boxes to avoid OOM)")
+    p.add_argument("--setup-only", action="store_true", help="Only build the dataset + yaml")
+    p.add_argument("--no-setup", action="store_true", help="Skip dataset conversion")
+    return p.parse_args(argv)
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--setup-only":
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    device = args.device
+    if isinstance(device, str) and device.isdigit():
+        device = int(device)
+
+    if args.setup_only:
         setup_dataset()
         create_yaml()
         print("Setup done. Ready for training.")
-    else:
+        return
+
+    if args.no_setup:
+        if not dataset_available():
+            raise FileNotFoundError(
+                f"--no-setup was given but no converted dataset exists at {DATASET_DIR}. "
+                "Run without --no-setup to convert the raw MAR20 tree."
+            )
+        print(f"--no-setup: using existing dataset at {DATASET_DIR}")
+    elif raw_dataset_available():
         print("Setting up MAR20 YOLO OBB dataset...")
         setup_dataset()
-        print("\nStarting YOLO11-OBB training...")
-        train()
+    elif dataset_available():
+        print(f"Raw MAR20 not found — using existing dataset at {DATASET_DIR}")
+    else:
+        raise FileNotFoundError(
+            "No raw MAR20 tree and no converted dataset found. "
+            "Run with --setup-only after placing the MAR20 files next to this script."
+        )
+
+    create_yaml()
+
+    print(f"\nStarting {args.model} training...")
+    train(
+        model_name=args.model,
+        epochs=args.epochs,
+        imgsz=args.imgsz,
+        batch=args.batch,
+        device=device,
+        patience=args.patience,
+        name=args.name,
+        fraction=args.fraction,
+        workers=args.workers,
+    )
+
+
+if __name__ == "__main__":
+    main()

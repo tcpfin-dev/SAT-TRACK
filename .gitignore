@@ -8,8 +8,23 @@ build/
 # Crush
 .crush/
 
+# Python virtualenvs
+.venv/
+venv/
+
+# Notebook smoke artifacts
+.smoke_nb.ipynb
+.smoke_out.ipynb
+.ipynb_checkpoints/
+
 # Model weights (too large for GitHub)
 *.pt
+
+# Notebook-generated artifacts (yolo26n_obb_train_eval.ipynb)
+/results/
+/yolo26n_obb_results.zip
+/mar20_obb.yaml
+/weights/
 
 # YOLO training runs (keep val images for README, ignore weights + predictions)
 runs/obb/*/weights/

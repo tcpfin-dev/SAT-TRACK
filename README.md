@@ -1,9 +1,8 @@
 # 🛰️ SAT-TRACK – Satellite Military Aircraft Detection & Tracking
 
-**Oriented bounding box detection of 20 military aircraft classes in overhead satellite imagery using YOLO11-OBB.**
+**Oriented bounding box detection of 20 military aircraft classes in overhead satellite imagery using YOLO26n-OBB.**
 
-[![Model](https://img.shields.io/badge/model-YOLO11n--OBB-blue)](https://docs.ultralytics.com/tasks/obb/)
-[![mAP50](https://img.shields.io/badge/mAP50-0.858-green)](#overall-performance)
+[![Model](https://img.shields.io/badge/model-YOLO26n--OBB-blue)](https://docs.ultralytics.com/tasks/obb/)
 [![Dataset](https://img.shields.io/badge/dataset-MAR20-orange)](https://github.com/username/MAR20)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
@@ -41,11 +40,22 @@ SAT-TRACK detects and classifies military aircraft in satellite images using ori
 ## Quick Start
 
 ```bash
-# Install
-pip install ultralytics
+# Install (a local virtualenv keeps this tidy)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-# Validate
+# Train YOLO26n-OBB on MAR20 (dataset auto-converted when raw MAR20 is present)
+python train_yolo_obb.py
+
+# Train a bigger YOLO26 variant
+python train_yolo_obb.py --model yolo26m-obb.pt --epochs 200
+
+# Dataset conversion only (no training)
+python train_yolo_obb.py --setup-only
+
+# Validate (uses the newest run found, or --model to pick one)
 python test_model.py --val
+python test_model.py --model runs/obb/mar20_yolo26n_train/weights/best.pt --val
 
 # Predict on a single image
 python test_model.py --image 42 --show
@@ -54,11 +64,37 @@ python test_model.py --image 42 --show
 python test_model.py --dir ./my_images/
 ```
 
+### Cloud training notebook
+
+`yolo26n_obb_train_eval.ipynb` is the self-contained route for a cloud GPU (Colab / Kaggle / Lambda):
+environment check, **checkpoint fetch (no weights to upload - `CFG["model"]` is downloaded from the official
+Ultralytics release, a URL, or used from a local path)**, dataset discovery + conversion, YOLO26n-OBB
+training, full validation with per-class metrics, curves, latency benchmark, and a zip of the results. Run
+all cells, or do a cheap pipeline check first with
+`SATTRACK_SMOKE=1 jupyter nbconvert --to notebook --execute yolo26n_obb_train_eval.ipynb`.
+
+### YOLO26 OBB checkpoints
+
+| Size | Checkpoint |
+|------|------------|
+| nano | `yolo26n-obb.pt` |
+| small | `yolo26s-obb.pt` |
+| medium | `yolo26m-obb.pt` |
+| large | `yolo26l-obb.pt` |
+| x-large | `yolo26x-obb.pt` |
+
+YOLO26-OBB removes DFL regression and runs **NMS-free end-to-end** inference, so post-processing cost no
+longer scales with the number of boxes. That matters here: dense airfields generate hundreds of
+overlapping OBBs, exactly where NMS dominates latency.
+
 ---
 
-## Validation Results – YOLO11n-OBB (Baseline)
+## Validation Results
 
-**Model:** YOLO11n-OBB (nano, 2.6M params)  
+> **Note:** the numbers below come from the run currently on disk (`runs/obb/mar20_train`). They were
+> measured before the project moved to YOLO26n-OBB and are kept as a reference point until the YOLO26n
+> run replaces them – `python train_yolo_obb.py` then `python test_model.py --val`.
+
 **Image Size:** 640×640  
 **Epochs:** 100 (early stopping at epoch 59)
 
@@ -148,24 +184,25 @@ Inference: **1.4 ms/image** (NVIDIA GPU).
 
 ## Architecture Strategy
 
-**Phase 1 – Scale up YOLO11-OBB:** The nano backbone likely lacks the receptive field to disambiguate fighter-sized airframes. Upgrading to medium or large should close the fighter gap *without* adding pipeline complexity.
+**Phase 1 – Scale up YOLO26-OBB:** The nano backbone likely lacks the receptive field to disambiguate fighter-sized airframes. Upgrading to medium or large should close the fighter gap *without* adding pipeline complexity.
 
 **Phase 2 – EfficientNet-B4 fallback (conditional):** If fighters remain below 0.85 mAP50 after scaling, add a cropped re-classifier. YOLO handles detection; low-confidence fighter predictions are re-classified by EfficientNet-B4 on the cropped OBB region.
 
 | Stage       | Model                          | Role                                              | Status        |
 |-------------|--------------------------------|---------------------------------------------------|---------------|
-| Baseline    | YOLO11n-OBB                    | Detect + classify all aircraft                    | ✅ mAP50 0.858 |
-| Scale-up    | YOLO11m-OBB or YOLO11l-OBB     | Larger backbone – close the fighter gap           | ⬜ Next        |
+| Production  | YOLO26n-OBB                    | NMS-free head, better small-object regression     | ✅ Default     |
+| Scale-up    | YOLO26m-OBB / YOLO26l-OBB      | Larger backbone – close the fighter gap           | ⬜ Next        |
 | Fallback    | EfficientNet-B4                | Fighter re-classifier (conditional)               | ⬜ If needed   |
 
 ---
 
 ## Next Steps
 
-1. **Train YOLO11m/l-OBB** – same data, compare fighter mAP50 vs nano.
-2. **If fighter mAP50 still < 0.85:** train EfficientNet-B4 on cropped fighter instances.
-3. **Add F-35, B-2, A-10** from MTARSI – fill gaps in the 20-class set.
-4. **Wire fallback pipeline** – low-confidence fighters → crop OBB → EfficientNet-B4 → override.
+1. **Retrain with YOLO26n-OBB** – `python train_yolo_obb.py`, then refresh this README's numbers.
+2. **Scale up YOLO26m/l-OBB** – change `--model` and re-run.
+3. **If fighter mAP50 still < 0.85:** train EfficientNet-B4 on cropped fighter instances.
+4. **Add F-35, B-2, A-10** from MTARSI – fill gaps in the 20-class set.
+5. **Wire fallback pipeline** – low-confidence fighters → crop OBB → EfficientNet-B4 → override.
 
 ---
 
@@ -173,10 +210,11 @@ Inference: **1.4 ms/image** (NVIDIA GPU).
 
 | File | Purpose |
 |------|---------|
-| `train_yolo_obb.py` | Training script – converts MAR20 to YOLO OBB format, trains model |
-| `test_model.py` | Validation, single-image prediction, batch inference |
-| `runs/obb/mar20_train/weights/best.pt` | Trained weights (YOLO11n-OBB baseline) |
-| `yolo_obb_dataset/mar20_obb.yaml` | Dataset config (auto-generated by training script) |
+| `train_yolo_obb.py` | Conversion + training. Defaults to `yolo26n-obb.pt`; `--model` selects another YOLO26-OBB variant |
+| `test_model.py` | Validation, single-image prediction, batch inference on any YOLO26-OBB checkpoint (`--model` to choose) |
+| `yolo26n_obb_train_eval.ipynb` | Cloud-ready notebook: train YOLO26n-OBB then evaluate it (metrics, curves, latency, results zip) |
+| `runs/obb/mar20_train/` | Results of the reference run currently on disk |
+| `yolo_obb_dataset/mar20_obb.yaml` | Dataset config (auto-generated, path fixed to this checkout) |
 
 ---
-*Built with [Ultralytics YOLO11](https://docs.ultralytics.com/) on the MAR20 dataset.*
+*Built with [Ultralytics YOLO26](https://docs.ultralytics.com/) on the MAR20 dataset.*
