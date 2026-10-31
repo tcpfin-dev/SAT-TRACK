@@ -1,5 +1,5 @@
 # MAR20 YOLO OBB dataset config (auto-generated — safe to regenerate)
-path: /root/SAT-TRACK/yolo_obb_dataset
+path: /workspace/SAT-TRACK/yolo_obb_dataset
 train: images/train
 val: images/val
 
