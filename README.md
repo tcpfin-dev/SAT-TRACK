@@ -77,6 +77,11 @@ python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --batch 16 \
 python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --patience 60 \
     --imgsz 1024 --batch 32 --device 0 --workers 16 \
     --cache ram --degrees 180 --cos-lr --name mar20_yolo26s_l40s_1024
+
+# YOLO26n-OBB @ 1024 + rotation  ->  runs/obb/mar20_yolo26n_l40s_1024   (capacity ablation, L40S)
+python train_yolo_obb.py --model yolo26n-obb.pt --epochs 200 --patience 60 \
+    --imgsz 1024 --batch 32 --device 0 --workers 16 \
+    --cache ram --degrees 180 --cos-lr --name mar20_yolo26n_l40s_1024
 ```
 
 Two defaults matter for reproduction:
@@ -167,24 +172,34 @@ overlapping OBBs, exactly where NMS dominates latency.
 ### Benchmark across scales and input size
 
 Rows 1–2 are the 640 px sweep: same split, same input, same decoder, same hyperparameters, only backbone
-scale changes (training hardware differs, RTX 4070 for n and L40S for s). Row 3 changes input resolution
-and augmentation as well, so it is not a like-for-like scale comparison.
+scale changes (training hardware differs, RTX 4070 for n and L40S for s). Rows 3–4 change input resolution
+and augmentation as well, so they are not a like-for-like scale comparison – but they are a like-for-like
+pair *against each other*, since both 1024 runs used the identical command.
 
 | Model | Input | Params | mAP@0.5 | mAP@0.5:0.95 | Precision | Recall | Inference |
 |-------|-------|--------|---------|--------------|-----------|--------|-----------|
 | YOLO26n-OBB | 640 | 2.65 M | 0.858 | 0.749 | 0.828 | 0.790 | 1.6 ms |
 | YOLO26s-OBB | 640 | 10.54 M | 0.873 | 0.762 | 0.839 | 0.808 | 3.1 ms |
+| YOLO26n-OBB + rot aug | 1024 | 2.65 M | 0.871 | 0.762 | 0.826 | 0.822 | – |
 | **YOLO26s-OBB + rot aug** | **1024** | 10.54 M | **0.892** | **0.786** | **0.865** | **0.840** | – |
 
 YOLO26s at 640 wins on every metric against its smaller sibling. Going from nano to small (4× the
 parameters) buys **+0.0146 mAP@0.5** and **+0.0126 mAP@0.5:0.95**, and it beats YOLO26n outright rather
 than only on box quality.
 
-Raising the input to 1024 and enabling rotation augmentation on the same backbone buys a further
+Raising the input to 1024 and enabling rotation augmentation on the s backbone buys a further
 **+0.019 mAP@0.5** and **+0.024 mAP@0.5:0.95** over the 640 run, which is more than the entire n → s
 scale-up delivered. That is the pixel-budget hypothesis in Why the Fighter Gap Exists paying off, not
 another width step. Its inference latency is not listed because it has not been timed on the RTX 4070
 reference card yet; on the L40S it validates at ~6.0 ms/image.
+
+The same 1024 + rotation change on the **nano** backbone buys only **+0.0125 mAP@0.5** and **+0.0127
+mAP@0.5:0.95** over its own 640 run (0.8582/0.7495 → 0.8708/0.7620), landing it level with the *s* model
+at 640 (0.8728/0.7621) and 0.024 behind s at 1024. That is the expected pattern: resolution multiplies
+whatever capacity you already have, and nano has little to multiply. Within nano the change is almost
+entirely a recall gain – precision is flat (0.828 → 0.826) while recall climbs **+0.032** (0.791 → 0.822) –
+so more pixels let nano find aircraft it was previously missing without becoming any more selective. It
+still sits below s on both P and R, which is the capacity gap showing through.
 
 ### YOLO26s run details
 
@@ -206,6 +221,26 @@ stays flat as detections per tile grow.
 **Hardware:** NVIDIA L40S (46 GB usable, 192 vCPU host) – 26.9 s/epoch, 72 min total, peak 25.7 GB VRAM  
 **Utilisation:** 89–100% `nvidia-smi`, 326 W of 350 W TDP, SM clock pinned at 2505/2520 MHz  
 **Checkpoints:** intermediate ones deleted during the run to stay inside a 10 GB volume; `best.pt` retained
+
+### YOLO26n @ 1024 run details
+
+**Image size:** 1024×1024 · **Rotation augmentation:** `degrees 180`  
+**Epochs:** 200 configured – early-stopped at 168 by `patience 60`; best fitness at epoch 108 (held by `best.pt`)  
+**Batch:** 32 · **Cache:** ram · **Workers:** 16 · **cos_lr:** enabled · **Train / Val:** 1,331 / 2,511  
+**Hardware:** NVIDIA L40S (46 GB usable, 192 vCPU host) – 17.1 s/epoch median, 51 min total, peak 15.3 GB VRAM  
+**Utilisation:** mean **54%** `nvidia-smi` (range 20–99%), 213 W of 350 W TDP, SM clock pinned at 2505/2520 MHz  
+**Checkpoints:** all `epoch*.pt` retained locally (19 files, ~470 MB); `best.pt` is the deployable one
+
+Same command as the s@1024 run, only the checkpoint differs, so this is a controlled capacity test. The
+L40S idles about half the time here: nano's forward/backward at batch 32 is cheap enough that the card
+finishes and waits on the dataloader, whereas the 4× heavier s model hid the same loader cost at 89–100%
+utilisation. Sizing the batch to the model (64–128 for nano at 1024) would have cut wall clock roughly in
+half without changing the effective batch, since `nbs 64` absorbs it via gradient accumulation.
+
+The 0.7729 fitness at epoch 108 is an **isolated peak**, not the run's level: the next best epochs in the
+whole run are ep 82 (0.7721) and ep 81 (0.7696), nothing adjacent comes close, and the mean mAP@0.5 of the
+last ten epochs is 0.8485 against a peak of 0.8708. Quote ~0.76 mAP@0.5:0.95 as nano's reproducible
+performance at 1024, and treat the peak as a lucky draw under patience expiry.
 
 ### YOLO26s vs. YOLO26n
 
@@ -286,15 +321,24 @@ planform being nearly interchangeable with other twin-tail fighters at this grou
 - **Single seed for the 1024 run too.** The +0.019 mAP50 gain over 640 is one observation. Its epoch-to-epoch
   jitter over epochs 100–160 is comparable in size to the gains it claims on individual classes, so the
   aggregate +0.019 is solid while the per-class deltas above ±0.05 should be treated as indicative.
+- **The nano@1024 run's number is a peak, not a level.** Best fitness landed at epoch 108 (0.7729) and
+  patience expired 60 epochs later at epoch 168; no adjacent epoch came within 0.013 of it, and the last-ten
+  epoch mean mAP@0.5 is 0.8485 vs a peak of 0.8708. Its reproducible level at 1024 is ~0.76 mAP@0.5:0.95,
+  which is also what the n@1024 vs s@640 near-tie (0.7620 vs 0.7621) should be read as – not a settled
+  ordering of those two configurations.
+- **The two 1024 runs are a controlled pair, the cross-resolution pairings are not.** Both used the exact
+  same command (batch 32, `cache ram`, `degrees 180`, `cos_lr`, `patience 60`, `seed 0`), so n vs s at 1024
+  differs only in capacity. 640 vs 1024 changes pixels, augmentation, and patience at once.
 - **Input-size caveat:** the 1024 model was validated at 1024 because `test_model.py` now reads
   `imgsz` from the run's `args.yaml`. Scoring it at 640 understates it, and the reverse also holds: do not
   compare its numbers against the 640 rows without noting the input size.
 - **All numbers come from `args.yaml`-recorded runs** (`mar20_yolo26n_train`, `mar20_yolo26s_train`,
-  `mar20_yolo26s_l40s_1024`), so hyperparameters are auditable rather than asserted.
-- **Different training hardware.** YOLO26n was trained on an RTX 4070 (12 GB), YOLO26s on an NVIDIA L40S
-  (48 GB). Hyperparameters are identical, and training hardware does not change the weights'
-  quality, but cuDNN/cuBLAS kernel selection means `seed: 0` + `deterministic: true` does **not** give
-  bit-identical reproduction across GPUs. Expect ±1e-3 wobble in the metrics on a different card, not zero.
+  `mar20_yolo26n_l40s_1024`, `mar20_yolo26s_l40s_1024`), so hyperparameters are auditable rather than asserted.
+- **Different training hardware.** The first YOLO26n run was trained on an RTX 4070 (12 GB), the L40S run
+  on an NVIDIA L40S (48 GB); both 1024 runs used the same L40S. Hyperparameters are identical, and training
+  hardware does not change the weights' quality, but cuDNN/cuBLAS kernel selection means `seed: 0` +
+  `deterministic: true` does **not** give bit-identical reproduction across GPUs. Expect ±1e-3 wobble in the
+  metrics on a different card, not zero.
 - **Latency is not a controlled comparison.** The inference column (1.6 ms vs 3.1 ms) was timed on an
   RTX 4070 for both checkpoints, but s was *trained* on the L40S. That is fine for a like-for-like
   timing (both timed on the same card), yet it means no training-time throughput figure here is
@@ -413,6 +457,8 @@ Fighters still cap the average – the class mean excluding F-15/F-16/F-22-type 
 **Phase 2 – Resolution and augmentation:** done. `imgsz 1024` plus `degrees 180`, `patience 60` and
 `cos_lr` bought **+0.019 mAP@0.5 / +0.024 mAP@0.5:0.95** over 640, more than the whole n → s scale-up.
 F-16, SU-24, TU-22, C-5, E-8 and KC-10 all gained 0.057 to 0.096; F-15 regressed 0.118 on recall.
+The identical change on nano returned only **+0.0127 mAP@0.5:0.95**, so the gain tracks capacity, not
+pixels alone - resolution is a multiplier on the parameters you already have.
 
 **Phase 3 – Edge deployment and benchmarking:** the 1024 checkpoint is the final model. Next step is
 deploying it to an **NVIDIA Jetson Orin Nano 8GB** and benchmarking on-device performance (see Edge
@@ -424,6 +470,7 @@ at 1024; FP16 TensorRT at batch 1 is the variant most likely to fit comfortably.
 | Scaled      | YOLO26n-OBB                    | NMS-free head, small-object regression            | ✅ mAP50 0.858 / 0.749 |
 | Scaled      | YOLO26s-OBB @ 640              | Width step over nano                              | ✅ mAP50 0.873 / 0.762 |
 | **Current** | **YOLO26s-OBB @ 1024 + rot aug** | **Final model: resolution + rotation**          | ✅ **mAP50 0.892 / 0.786** |
+| Ablation    | YOLO26n-OBB @ 1024 + rot aug   | Same command on nano, capacity check              | ✅ mAP50 0.871 / 0.762 |
 | Deployment  | YOLO26s-OBB on Jetson Orin Nano | TensorRT export, on-device benchmark + paper      | ⬜ Next |
 
 ---
@@ -480,6 +527,7 @@ The training work is done: YOLO26s-OBB at 1024 with rotation augmentation is the
 | `train_yolo_obb.py` | Conversion + training. Defaults to `yolo26n-obb.pt`, `--epochs 100`, `--patience 20`, `--batch 16`, `--imgsz 640`. Also passes through `--cache`, `--cos-lr`, `--degrees`, `--close-mosaic`, `--lr0`, `--optimizer`, `--seed`, `--no-amp`, `--rect`; `--model` selects another YOLO26-OBB variant |
 | `test_model.py` | Validation, single-image prediction, batch inference on any YOLO26-OBB checkpoint (`--model` to choose). Reads `imgsz` from the run's `args.yaml` (override with `--imgsz`) |
 | `runs/obb/mar20_yolo26s_l40s_1024/` | **Current model** – YOLO26s-OBB @ 1024 with rotation augmentation. Curves, confusion matrix, val batches, `best.pt` (weights git-ignored) |
+| `runs/obb/mar20_yolo26n_l40s_1024/` | YOLO26n-OBB @ 1024 with rotation augmentation – the capacity ablation for the row above, same command, `best.pt` = epoch 108 |
 | `runs/obb/mar20_yolo26s_train/` | YOLO26s-OBB @ 640, kept for the 640 → 1024 comparison |
 | `runs/obb/mar20_yolo26n_train/` | YOLO26n-OBB run, kept for the scale comparison |
 | `logs/train_l40s_1024.log`, `logs/val_1024.txt` | Full training transcript and final validation output for the 1024 run |

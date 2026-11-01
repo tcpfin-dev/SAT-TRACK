@@ -24,6 +24,7 @@ DATA_YAML = BASE_DIR / "yolo_obb_dataset" / "mar20_obb.yaml"
 # Candidate weights, newest run first.
 CANDIDATE_WEIGHTS = [
     BASE_DIR / "runs" / "obb" / "mar20_yolo26s_l40s_1024" / "weights" / "best.pt",
+    BASE_DIR / "runs" / "obb" / "mar20_yolo26n_l40s_1024" / "weights" / "best.pt",
     BASE_DIR / "runs" / "obb" / "mar20_yolo26s_train" / "weights" / "best.pt",
     BASE_DIR / "runs" / "obb" / "mar20_yolo26n_train" / "weights" / "best.pt",
 ]
