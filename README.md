@@ -44,15 +44,6 @@ SAT-TRACK detects and classifies military aircraft in satellite images using ori
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Train YOLO26n-OBB on MAR20 (dataset auto-converted when raw MAR20 is present)
-python train_yolo_obb.py
-
-# Train the current best variant (YOLO26s-OBB, see Validation Results)
-python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --patience 60 --cos-lr
-
-# Train a bigger YOLO26 variant
-python train_yolo_obb.py --model yolo26m-obb.pt --epochs 200
-
 # Dataset conversion only (no training)
 python train_yolo_obb.py --setup-only
 
@@ -67,36 +58,75 @@ python test_model.py --image 42 --show
 python test_model.py --dir ./my_images/
 ```
 
-### Cloud GPU training
+### Reproducing the reported runs
 
-There is one entry point for training: `train_yolo_obb.py`. It works unchanged on a cloud instance
-(Colab, Kaggle, Lambda, RunPod) - point `--device` at the GPU index and it downloads the requested
-checkpoint itself, so there is no weights file to upload:
+These are the **exact** commands behind the numbers in Validation Results. Everything not passed on the
+command line stays at the script defaults (`optimizer: auto`, `amp: true`, `seed: 0`,
+`deterministic: true`, `close_mosaic: 10`, no cosine LR schedule).
 
 ```bash
-git clone <this-repo> && cd SAT-TRACK
-pip install -r requirements.txt
+# YOLO26n-OBB  ->  runs/obb/mar20_yolo26n_train   (trained on RTX 4070 12 GB)
+python train_yolo_obb.py --model yolo26n-obb.pt --epochs 200 --batch 16 \
+    --imgsz 640 --device 0 --workers 4
 
-# dataset conversion happens automatically when the raw MAR20 tree is present
-python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --device 0 --batch 32 --workers 8
-python train_yolo_obb.py --model yolo26m-obb.pt --epochs 200 --device 0 --batch 32 --workers 8
+# YOLO26s-OBB  ->  runs/obb/mar20_yolo26s_train   (trained on NVIDIA L40S 48 GB)
+python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --batch 16 \
+    --imgsz 640 --device 0 --workers 8
 ```
 
-What that produces, per model, under `runs/obb/`:
+Two defaults matter for reproduction:
 
-| Path | Contents |
-|------|----------|
-| `runs/obb/mar20_<model>_train/` | `weights/`, `results.csv`, `args.yaml`, curves, confusion matrix, batch images |
-| `runs/obb/val/` (then `val2`, `val3`, ...) | output of a later `python test_model.py --val` |
+- **`--epochs` defaults to 100**, so it must be passed explicitly. The reported runs used 200.
+- **`--patience` defaults to 20 and was left there.** Neither run used `--patience 60`, and neither
+  used `--cos-lr`.
 
-Run names are derived from the checkpoint (`yolo26s-obb.pt` -> `mar20_yolo26s_train`), so different
-sizes never collide. Two things to know before downloading the results:
+The only difference between the two runs besides the checkpoint is `--workers` (4 vs 8, dataloader
+only, no effect on the model), so the n → s comparison is controlled.
 
-- **`exist_ok=True`** - re-running the same model **overwrites** its run dir. Use `--name mar20_yolo26s_v2`
-  to keep an earlier attempt.
-- **Checkpoints dominate the size.** `save_period=10` writes a full checkpoint every 10 epochs (~110 MB
-  for s, ~245 MB for m each). Pull only `best.pt`, `results.csv`, and the PNGs; leave `weights/` behind.
-  `*.pt` and `runs/obb/*/weights/` are git-ignored, so nothing large can slip into a commit.
+> `--patience 60 --cos-lr` appears in Next Steps as a **proposal for future runs** (the early stop at
+> high LR is a known weakness of the current s run). It is not the configuration that produced the
+> results above, and no run has used it yet.
+
+### Resolved hyperparameters (identical for both runs)
+
+Dumped from each run's `args.yaml`:
+
+| Group | Values |
+|-------|--------|
+| Schedule | `lr0 0.01`, `lrf 0.01`, `momentum 0.937`, `weight_decay 0.0005`, `warmup_epochs 3.0`, `cos_lr false` |
+| Loss | `box 7.5`, `cls 0.5`, `dfl 1.5`, `nbs 64` |
+| Val / inference | `iou 0.7`, `max_det 300`, `conf null` |
+| Geometry aug | `degrees 0.0`, `translate 0.1`, `scale 0.5`, `shear 0.0`, `perspective 0.0` |
+| Flip / mosaic | `flipud 0.0`, `fliplr 0.5`, `mosaic 1.0`, `mixup 0.0`, `cutmix 0.0`, `copy_paste 0.0` |
+| Photometric | `hsv_h 0.015`, `hsv_s 0.7`, `hsv_v 0.4`, `erasing 0.4`, `auto_augment randaugment` |
+
+### Proposed L40S configuration (not yet run)
+
+The reported YOLO26s run left most of the L40S idle: no image cache, `mosaic: 1.0` forcing ~4 JPEG
+decodes per sample (~5,400 per epoch), `batch 16` at 640 on a 48 GB card, and `imgsz 640` against
+734–800 px source imagery. It managed ~16 s/epoch, which is dataloader-bound, not GPU-bound.
+
+The config that uses the card, and attacks the pixel-budget limit named in Why the Fighter Gap Exists:
+
+```bash
+python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --patience 60 \
+    --imgsz 1024 --batch 32 --device 0 --workers 12 \
+    --cache ram --degrees 180 --cos-lr --name mar20_yolo26s_l40s_1024
+```
+
+| Flag | Why |
+|------|-----|
+| `--cache ram` | 1,331 images at ~800 px is well under 1 GB; removes per-epoch decode entirely |
+| `--workers 12` | `nproc - 1` on a typical 16 vCPU cloud host; the loader was the bottleneck |
+| `--batch 32 --imgsz 1024` | ~5× the activation footprint of batch 16 @ 640, roughly 25 GB of 48 GB |
+| `--degrees 180` | Rotation augmentation; overhead aircraft sit at arbitrary azimuth and every reported run used `degrees: 0.0` |
+| `--cos-lr --patience 60` | Low-LR tail instead of early-stopping at high LR (the reported run stopped at LR 3e-4) |
+
+Fallbacks: drop to `--batch 24` or `--batch 16` if the 1024 run OOMs, and verify with `nvidia-smi`
+during epoch 1 that GPU utilisation sits well above the old ~30%. Keep `--imgsz 1024` fixed when
+comparing; changing both size and batch at once makes the result unattributable.
+
+Not a like-for-like comparison with the 640 px results above, and must be reported as a separate row.
 
 ### YOLO26 OBB checkpoints
 
@@ -121,7 +151,9 @@ overlapping OBBs, exactly where NMS dominates latency.
 
 ### Benchmark across scales
 
-Same val split, same 640×640 input, same decoder – only the backbone scale changes.
+Same val split, same 640×640 input, same decoder, same hyperparameters – only the backbone scale changes.
+Training hardware differs (RTX 4070 for n, L40S for s); see the hardware caveat below for what that does
+and does not affect.
 
 | Model | Params | mAP@0.5 | mAP@0.5:0.95 | Precision | Recall | Inference |
 |-------|--------|---------|--------------|-----------|--------|-----------|
@@ -136,11 +168,14 @@ rather than only on box quality.
 ### YOLO26s run details
 
 **Image size:** 640×640  
-**Epochs:** 200 configured – early-stopped at 60, best fitness at epoch 40 (held by `best.pt`)  
-**Batch:** 16 · **Device:** cloud GPU (~15 s/epoch, ~16 min total) · **Train / Val:** 1,331 / 2,511 images
+**Epochs:** 200 configured – early-stopped at 60, best fitness at epoch 40 (held by `best.pt`), `patience: 20`  
+**Batch:** 16 · **Train / Val:** 1,331 / 2,511 images  
+**Hardware:** NVIDIA L40S (48 GB, Ada Lovelace, cloud instance at `/workspace/SAT-TRACK`) – ~15 s/epoch,
+~16 min total. The YOLO26n run was trained on a local **RTX 4070 (12 GB)** instead.
 
-Inference on RTX 4070: **3.1 ms model inference / 5.8 ms per image end-to-end** (1.1 ms pre-process,
-0.0 ms NMS, 1.6 ms post-process). Still NMS-free, so post-processing stays flat as detections per tile grow.
+Inference was timed on an RTX 4070 (not on the L40S): **3.1 ms model inference / 5.8 ms per image
+end-to-end** (1.1 ms pre-process, 0.0 ms NMS, 1.6 ms post-process). Still NMS-free, so post-processing
+stays flat as detections per tile grow.
 
 ### YOLO26s vs. YOLO26n
 
@@ -171,8 +206,21 @@ Scaling did not just move the average – it changed which classes work. Deltas 
 - **`best.pt` was selected as the best epoch on this same val split**, so it carries selection optimism.
   A held-out test set (MAR20's split is reused as val here) is what would settle it.
 - **s was early-stopped while still at high LR** (`cos_lr: false`, schedule spans the configured 200 epochs;
-  LR at stop was ~0.0003 vs 0.00014 at start). It never got a low-LR refinement tail, so it is likely not
-  fully converged.
+  LR at stop was ~0.0003 vs 0.00014 at start). Early stopping fired at epoch 60 with `patience: 20` and
+  best fitness at epoch 40. It never got a low-LR refinement tail, so it is likely not fully converged.
+- **Both runs used `patience: 20` and `cos_lr: false`** — the script defaults. See "Reproducing the
+  reported runs" for the exact commands; the `--patience 60 --cos-lr` setting mentioned in Next Steps
+  is an untried proposal, not part of these results.
+- **All numbers come from `args.yaml`-recorded runs** (`runs/obb/mar20_yolo26n_train/args.yaml`,
+  `runs/obb/mar20_yolo26s_train/args.yaml`), so hyperparameters are auditable rather than asserted.
+- **Different training hardware.** YOLO26n was trained on an RTX 4070 (12 GB), YOLO26s on an NVIDIA L40S
+  (48 GB). Hyperparameters are identical, and training hardware does not change the weights'
+  quality, but cuDNN/cuBLAS kernel selection means `seed: 0` + `deterministic: true` does **not** give
+  bit-identical reproduction across GPUs. Expect ±1e-3 wobble in the metrics on a different card, not zero.
+- **Latency is not a controlled comparison.** The inference column (1.6 ms vs 3.1 ms) was timed on an
+  RTX 4070 for both checkpoints, but s was *trained* on the L40S. That is fine for a like-for-like
+  timing (both timed on the same card), yet it means no training-time throughput figure here is
+  comparable – the Jetson benchmark exists precisely to produce a single-common-device latency table.
 
 ### Training Curves
 
@@ -269,36 +317,61 @@ Two configuration gaps that make the gap worse than it has to be:
 mAP@0.5 0.873 / mAP@0.5:0.95 0.762, beating YOLO26n on every metric and lifting F-22 from 0.500 to 0.619.
 Fighters still cap the average – the class mean excluding F-15/F-16/F-22-type failures is ~0.91.
 
-**Phase 2 – Resolution and augmentation before more width:** `imgsz 1024` plus `degrees=180` rotation
-augmentation, with `patience 60` and `cos_lr` so the run is not early-stopped at high LR. Expected to beat
+**Phase 2 – Resolution and augmentation:** `imgsz 1024` plus `degrees=180` rotation
+augmentation, with `patience 60` and `cos_lr` so the run is not early-stopped at high LR. (Proposed only –
+no run has used this yet; the reported numbers come from `patience 20`, `cos_lr false`.) Expected to beat
 another width step, since the remaining errors are resolution-bound.
 
-**Phase 3 – EfficientNet-B4 fallback (conditional):** if F-15/F-16/F-22 remain below 0.85 mAP50 after
-that, add a cropped re-classifier. YOLO handles detection; low-confidence fighter predictions are
-re-classified by EfficientNet-B4 on the cropped OBB region.
+**Phase 3 – Edge deployment and benchmarking:** YOLO26s-OBB is the final model. Next step is deploying it
+to an **NVIDIA Jetson Orin Nano 8GB** and benchmarking on-device performance (see Edge Deployment below).
 
 | Stage       | Model                          | Role                                              | Status        |
 |-------------|--------------------------------|---------------------------------------------------|---------------|
 | Baseline    | YOLO11n-OBB                    | Original run, kept for comparison                 | ✅ mAP50 0.859 / 0.742 |
 | Scaled      | YOLO26n-OBB                    | NMS-free head, small-object regression            | ✅ mAP50 0.858 / 0.749 |
-| **Current** | **YOLO26s-OBB**                | **10.54 M params, best accuracy so far**          | ✅ **mAP50 0.873 / 0.762** |
-| Scale-up    | YOLO26m-OBB / YOLO26l-OBB      | More width – diminishing returns expected         | ⬜ Next, optional |
-| Resolution  | YOLO26s-OBB @ 1024 + rotation  | Attack the pixel-budget limit directly            | ⬜ Next, preferred |
-| Fallback    | EfficientNet-B4                | Fighter re-classifier (conditional)               | ⬜ If needed   |
+| **Current** | **YOLO26s-OBB**                | **10.54 M params, final model**                   | ✅ **mAP50 0.873 / 0.762** |
+| Deployment  | YOLO26s-OBB on Jetson Orin Nano | TensorRT export, on-device benchmark + paper      | ⬜ Next |
+
+---
+
+## Edge Deployment (Jetson Orin Nano 8GB)
+
+The trained YOLO26s-OBB checkpoint is the deliverable; the deployment target is an NVIDIA Jetson Orin
+Nano 8GB (Ampere, 1024-core GPU, 6-core ARM Cortex-A78AE, 8 GB shared LPDDR5 at 68 GB/s).
+
+Planned benchmark matrix – same 2,511-image val split, accuracy must match the desktop numbers
+(RTX 4070 reference timings above; the L40S was training-only).
+
+| Variant | What it measures |
+|---------|------------------|
+| PyTorch FP32 (`best.pt`) | Baseline, no optimisation |
+| ONNX Runtime | Export portability, CPU/GPU EP |
+| TensorRT FP16 | Realistic edge latency |
+| TensorRT INT8 (calibrated on MAR20) | Throughput ceiling vs. mAP loss |
+
+Metrics to report per variant: per-image latency (pre/inference/post split), FPS at batch 1, mean
+power draw and energy per frame (`jtop`), peak memory, thermal throttling over a sustained run, and
+mAP@0.5 / mAP@0.5:0.95 parity against the desktop checkpoint.
 
 ---
 
 ## Next Steps
 
-1. **YOLO26s-OBB at `--imgsz 1024 --degrees 180 --patience 60 --cos-lr`** – highest expected value per GPU-hour.
-2. **YOLO26m-OBB** – `python train_yolo_obb.py --model yolo26m-obb.pt --epochs 200 --patience 60 --cos-lr`;
-   run it as the control for whether width alone still buys anything.
-3. **Prove gains with seeds, not single runs** – the val curve jitters ±0.014, so anything under ~1.5 points
+1. **Export and benchmark on Jetson Orin Nano 8GB** – `best.pt` → ONNX → TensorRT FP16/INT8, measure
+   latency, FPS, power, and memory per variant.
+2. **Validate on-device accuracy parity** – re-run `test_model.py --val` logic on the Jetson against the
+   same val split; any mAP loss from FP16/INT8 quantisation is the headline trade-off.
+3. **Write the short paper** – YOLO26s-OBB on MAR20 plus the Jetson Orin Nano benchmark suite
+   (accuracy / latency / power), reporting the exact commands from "Reproducing the reported runs" and
+   the measurement caveats below.
+4. **Prove gains with seeds, not single runs** – the val curve jitters ±0.014, so anything under ~1.5 points
    is indistinguishable from noise in one run. Run the winner 2–3 times and report mean ± std.
-4. **If F-15/F-16/F-22 mAP50 still < 0.85:** train EfficientNet-B4 on cropped fighter instances.
-5. **Add F-35, B-2, A-10** from MTARSI – fill gaps in the 20-class set.
-6. **Tune F/A-18 and E-8 confidence thresholds** – F/A-18 is P 0.967 / R 0.599 and E-8 is P 0.929 / R 0.586;
+5. **Tune F/A-18 and E-8 confidence thresholds** – F/A-18 is P 0.967 / R 0.599 and E-8 is P 0.929 / R 0.586;
    both have recall sitting just below the operating point and a per-class conf cut is nearly free.
+
+Optional training-hygiene run (not yet executed): retrain YOLO26s-OBB with
+`--patience 60 --cos-lr` to give it a low-LR tail instead of early-stopping at high LR. Adopt it only if
+it beats the reported 0.873 / 0.762; otherwise the current checkpoint stands as the final model.
 
 ---
 
@@ -306,7 +379,7 @@ re-classified by EfficientNet-B4 on the cropped OBB region.
 
 | File | Purpose |
 |------|---------|
-| `train_yolo_obb.py` | Conversion + training. Defaults to `yolo26n-obb.pt`; `--model` selects another YOLO26-OBB variant |
+| `train_yolo_obb.py` | Conversion + training. Defaults to `yolo26n-obb.pt`, `--epochs 100`, `--patience 20`, `--batch 16`, `--imgsz 640`. Also passes through `--cache`, `--cos-lr`, `--degrees`, `--close-mosaic`, `--lr0`, `--optimizer`, `--seed`, `--no-amp`, `--rect`; `--model` selects another YOLO26-OBB variant |
 | `test_model.py` | Validation, single-image prediction, batch inference on any YOLO26-OBB checkpoint (`--model` to choose) |
 | `runs/obb/mar20_yolo26s_train/` | **YOLO26s-OBB run reported above** – curves, confusion matrix, val batches, `best.pt` (weights git-ignored) |
 | `runs/obb/mar20_yolo26n_train/` | YOLO26n-OBB run, kept for the scale comparison |

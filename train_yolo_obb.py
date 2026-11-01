@@ -327,6 +327,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Dataloader workers (keep low on WSL/low-RAM boxes to avoid OOM)")
     p.add_argument("--setup-only", action="store_true", help="Only build the dataset + yaml")
     p.add_argument("--no-setup", action="store_true", help="Skip dataset conversion")
+
+    # --- pass-through training options (only applied when given, so defaults stay untouched) ---
+    t = p.add_argument_group("training options (passed straight to Ultralytics)")
+    t.add_argument("--cache", default="false", choices=["false", "ram", "disk"],
+                   help="Cache images: 'ram' for datasets that fit in memory (recommended on cloud)")
+    t.add_argument("--cos-lr", action="store_true",
+                   help="Enable cosine LR schedule (uses the full --epochs span)")
+    t.add_argument("--degrees", type=float, default=None,
+                   help="Rotation augmentation range in degrees (overhead imagery wants ~180)")
+    t.add_argument("--close-mosaic", type=int, default=None,
+                   help="Disable mosaic for the last N epochs (Ultralytics default: 10)")
+    t.add_argument("--lr0", type=float, default=None, help="Initial learning rate")
+    t.add_argument("--optimizer", default=None, help="auto|SGD|Adam|AdamW|NAdam|RAdam|RMSProp")
+    t.add_argument("--seed", type=int, default=None, help="Global RNG seed")
+    t.add_argument("--no-amp", action="store_true", help="Disable mixed precision")
+    t.add_argument("--rect", action="store_true", help="Rectangular training batches")
     return p.parse_args(argv)
 
 
@@ -363,6 +379,32 @@ def main(argv: list[str] | None = None) -> None:
     create_yaml()
 
     print(f"\nStarting {args.model} training...")
+
+    # Only forward options the user actually set. Keys that train() already passes explicitly
+    # (data/epochs/imgsz/batch/device/patience/name/fraction/workers/project/exist_ok) must NOT
+    # appear here or Python raises "got multiple values for keyword argument".
+    extra: dict = {}
+    if args.cache != "false":
+        extra["cache"] = args.cache
+    if args.cos_lr:
+        extra["cos_lr"] = True
+    if args.degrees is not None:
+        extra["degrees"] = args.degrees
+    if args.close_mosaic is not None:
+        extra["close_mosaic"] = args.close_mosaic
+    if args.lr0 is not None:
+        extra["lr0"] = args.lr0
+    if args.optimizer is not None:
+        extra["optimizer"] = args.optimizer
+    if args.seed is not None:
+        extra["seed"] = args.seed
+    if args.no_amp:
+        extra["amp"] = False
+    if args.rect:
+        extra["rect"] = True
+    if extra:
+        print("extra training args: " + ", ".join(f"{k}={v}" for k, v in extra.items()))
+
     train(
         model_name=args.model,
         epochs=args.epochs,
@@ -375,6 +417,7 @@ def main(argv: list[str] | None = None) -> None:
         workers=args.workers,
         weights_dir=args.weights_dir,
         download=not args.no_download,
+        extra=extra or None,
     )
 
 
