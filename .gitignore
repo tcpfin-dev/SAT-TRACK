@@ -13,14 +13,15 @@ build/
 venv/
 
 # Model weights (do not commit binaries; see "Cloud GPU training" in README)
+# Only the final best.pt checkpoints are tracked; everything else stays out.
 *.pt
+!best.pt
 
 # Downloaded checkpoints + generated dataset yaml
 /mar20_obb.yaml
 /weights/
 
 # YOLO training runs (keep val images for README, ignore weights + predictions)
-runs/obb/*/weights/
 runs/obb/predict/
 
 # IDE
