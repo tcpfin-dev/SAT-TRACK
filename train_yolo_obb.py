@@ -18,6 +18,13 @@ Usage:
     python train_yolo_obb.py --setup-only           # dataset only, no training
     python train_yolo_obb.py --no-setup             # train on existing dataset
     python train_yolo_obb.py --model yolo26m-obb.pt --weights-dir /data/weights
+    python train_yolo_obb.py --resume --batch 16    # continue the newest run's last.pt
+
+--resume restores the optimizer, scaler, EMA, best fitness and early-stopping state from
+the checkpoint, so it continues the run instead of restarting it. Ultralytics only lets a resume
+change a small set of arguments (batch, imgsz, device, workers, cache, patience, close_mosaic,
+save_period) - that set exists precisely so a crashed run can be resumed with a smaller batch.
+Anything else on the command line is ignored by ultralytics, and so is anything you do not pass.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -307,6 +315,138 @@ def train(
     return save_dir
 
 
+def resolve_resume_ckpt(spec: str) -> Path:
+    """Resolve ``--resume`` to a checkpoint that still holds optimizer state.
+
+    ``latest`` (also ``true``/empty) picks the most recently written ``runs/obb/*/weights/last.pt``.
+    A path is used as-is, relative paths are resolved against the script directory.
+    """
+    if str(spec).strip().lower() in {"latest", "true", "1", ""}:
+        candidates = [p for p in RUNS_DIR.glob("*/weights/last.pt") if p.is_file()]
+        if not candidates:
+            raise FileNotFoundError(f"--resume latest: no runs under {RUNS_DIR}")
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        print(f"--resume latest -> {newest}")
+        return newest
+
+    path = Path(spec).expanduser()
+    if not path.is_absolute():
+        path = (BASE_DIR / path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {path}")
+    return path
+
+
+NBS = 64  # ultralytics nominal batch; any batch dividing it keeps the effective batch AND weight decay identical
+
+
+def resume_plan(ckpt_path: Path) -> dict:
+    """Print what a resume will actually do, before ultralytics is allowed to start.
+
+    On resume the checkpoint - not the command line - owns data/project/name/epochs/batch. So a box
+    whose absolute paths differ from the one that trained does not continue the run: ultralytics
+    recreates the recorded save_dir, finds no results.csv, and starts a fresh one there. Check the
+    paths here, while it is still a message instead of an hour of wasted compute.
+    """
+    import torch
+
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ta = dict(ckpt.get("train_args") or {})
+    done = int(ckpt.get("epoch", -1)) + 1  # csv epoch column is 1-based, the checkpoint stores 0-based
+    next_epoch = done + 1
+    total = int(ta.get("epochs") or 0)
+    patience = int(ta.get("patience") or 0)
+    stopper = dict(ckpt.get("stopper") or {})
+    best_epoch = stopper.get("best_epoch")
+    best = ckpt.get("best_fitness", stopper.get("best_fitness"))
+    data = ta.get("data")
+    save_dir = Path(str(ta.get("save_dir") or Path(str(ta.get("project", "runs"))) / str(ta.get("name", "train"))))
+    batch = int(ta.get("batch") or 0)
+    nbs = int(ta.get("nbs") or NBS)
+
+    print("\n--- resume plan -------------------------------------------------")
+    print(f"checkpoint     : {ckpt_path}")
+    print(f"epochs done    : {done} checkpointed of {total}  ->  reruns epoch {next_epoch} "
+          f"(the interrupted epoch was never saved)")
+    print(f"best fitness   : {best} at epoch {best_epoch}")
+    print(f"trained with   : model={ta.get('model')} batch={batch} imgsz={ta.get('imgsz')} "
+          f"optimizer={ta.get('optimizer')} nbs={nbs}")
+    print(f"data (baked)   : {data}")
+    print(f"save_dir(baked): {save_dir}")
+    if patience:
+        stop_at = (best_epoch or done) + patience
+        print(f"early stopping : patience {patience} counts from best epoch {best_epoch} "
+              f"-> stops at epoch {min(stop_at, total)} unless fitness beats {best} (patience 0 = never)")
+    if batch and nbs and batch > nbs:
+        print(f"[warn] batch {batch} > nbs {nbs}: accumulation collapses to 1 and weight decay is rescaled")
+    elif batch and nbs and nbs % batch:
+        print(f"[warn] batch {batch} does not divide nbs {nbs}: effective batch "
+              f"{batch * max(round(nbs / batch), 1)} and weight decay x{batch * max(round(nbs / batch), 1) / nbs:.3f}")
+    if ckpt.get("optimizer") is None:
+        print(f"[warn] {ckpt_path.name} carries no optimizer/scaler state (a stripped best.pt?) - "
+              f"resuming from it restarts AdamW moments, so the LR ramp will lurch. Prefer last.pt.")
+    if not data or not Path(str(data)).is_file():
+        print(f"[warn] dataset yaml NOT found at the baked path - this box cannot continue the run as-is. "
+              f"Mirror the checkout (and yolo_obb_dataset/) at that exact path, or edit the dataset path in a copy.")
+    if not save_dir.exists():
+        print(f"[warn] run dir {save_dir} does not exist on this box: ultralytics will CREATE it and start "
+              f"a fresh results.csv there, losing the {done}-epoch history. Mirror the run dir "
+              f"(args.yaml + results.csv + weights/last.pt) at that exact path.")
+    else:
+        csv_path = save_dir / "results.csv"
+        rows = len(csv_path.read_text().splitlines()) - 1 if csv_path.is_file() else 0
+        print(f"run dir        : exists, results.csv has {rows} epoch rows")
+    print("-----------------------------------------------------------------\n")
+    return {"done": done, "next_epoch": next_epoch, "total": total, "best": best,
+            "best_epoch": best_epoch, "data": data, "save_dir": save_dir}
+
+
+def resume_train(ckpt_path: Path, explicit: set[str], args: argparse.Namespace) -> Path:
+    """Continue an interrupted run from ``ckpt_path``.
+
+    Only arguments the user actually typed are forwarded: everything else keeps the value
+    recorded in the checkpoint, which is what makes this a resume and not a restart. Ultralytics
+    silently clamps what it accepts on resume to batch/imgsz/device/workers/cache/patience/
+    close_mosaic/save_period, so passing anything more would just produce warnings.
+    """
+    from ultralytics import YOLO
+
+    kwargs: dict = {"resume": str(ckpt_path)}
+    forward = {
+        "--batch": "batch",
+        "--imgsz": "imgsz",
+        "--workers": "workers",
+        "--patience": "patience",
+        "--close-mosaic": "close_mosaic",
+    }
+    for flag, key in forward.items():
+        if flag in explicit:
+            kwargs[key] = getattr(args, key)
+    if "--device" in explicit:
+        device = args.device
+        kwargs["device"] = int(device) if str(device).isdigit() else device
+    if "--cache" in explicit and args.cache != "false":
+        kwargs["cache"] = args.cache
+
+    print(f"Resuming from {ckpt_path}")
+    print("resume overrides: " + ", ".join(f"{k}={v}" for k, v in kwargs.items() if k != "resume"))
+    resume_plan(ckpt_path)
+
+    model = YOLO(str(ckpt_path))
+    model.train(**kwargs)
+
+    save_dir = Path(str(getattr(model.trainer, "save_dir", ckpt_path.parents[1])))
+    print(f"\nResume complete. Run dir: {save_dir}")
+    print(f"Best weights: {save_dir / 'weights' / 'best.pt'}")
+    return save_dir
+
+
+def _explicit_flags(argv: list[str] | None) -> set[str]:
+    """Flags genuinely present on the command line - argparse defaults hide that distinction."""
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    return {t.split("=", 1)[0] for t in tokens if t.startswith("--")}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train YOLO OBB on MAR20 (YOLO26 by default).")
     p.add_argument("--model", default=DEFAULT_MODEL,
@@ -327,6 +467,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Dataloader workers (keep low on WSL/low-RAM boxes to avoid OOM)")
     p.add_argument("--setup-only", action="store_true", help="Only build the dataset + yaml")
     p.add_argument("--no-setup", action="store_true", help="Skip dataset conversion")
+    p.add_argument("--resume", nargs="?", const="latest", default=None, metavar="CKPT",
+                   help="Resume an interrupted run from its weights/last.pt (a full epochN.pt also "
+                        "works). Pass --resume alone for the newest run. Only batch/imgsz/device/"
+                        "workers/cache/patience/close-mosaic are taken from the command line on "
+                        "resume; everything else keeps the values recorded in the checkpoint")
 
     # --- pass-through training options (only applied when given, so defaults stay untouched) ---
     t = p.add_argument_group("training options (passed straight to Ultralytics)")
@@ -377,6 +522,14 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     create_yaml()
+
+    if args.resume:
+        explicit = _explicit_flags(argv)
+        for flag in ("--model", "--name"):
+            if flag in explicit:
+                print(f"[warn] --resume ignores {flag}: the checkpoint and its run dir win")
+        resume_train(resolve_resume_ckpt(args.resume), explicit, args)
+        return
 
     print(f"\nStarting {args.model} training...")
 
