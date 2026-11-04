@@ -8,7 +8,7 @@ Usage:
     python test_model.py --image 123               # predict on a single image
     python test_model.py --image 123 --show        # predict and display
     python test_model.py --val                     # run ultralytics val mode
-    python test_model.py --model runs/obb/mar20_yolo26n_train/weights/best.pt
+    python test_model.py --model runs/obb/mar20_yolo26n_l40s_1024/weights/best.pt
 """
 
 from __future__ import annotations
@@ -25,8 +25,6 @@ DATA_YAML = BASE_DIR / "yolo_obb_dataset" / "mar20_obb.yaml"
 CANDIDATE_WEIGHTS = [
     BASE_DIR / "runs" / "obb" / "mar20_yolo26s_l40s_1024" / "weights" / "best.pt",
     BASE_DIR / "runs" / "obb" / "mar20_yolo26n_l40s_1024" / "weights" / "best.pt",
-    BASE_DIR / "runs" / "obb" / "mar20_yolo26s_train" / "weights" / "best.pt",
-    BASE_DIR / "runs" / "obb" / "mar20_yolo26n_train" / "weights" / "best.pt",
 ]
 
 CLASS_NAMES = [
