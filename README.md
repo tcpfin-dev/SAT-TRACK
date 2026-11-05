@@ -60,12 +60,13 @@ python test_model.py --dir ./my_images/
 
 ### Reproducing the reported runs
 
-These are the **exact** commands behind the numbers in Validation Results. Everything not passed on the
-command line stays at the script defaults (`optimizer: auto`, `amp: true`, `seed: 0`,
-`deterministic: true`, `close_mosaic: 10`).
+These are the commands behind the numbers in Validation Results. Everything not passed on the command
+line stays at the script defaults (`optimizer: auto`, `amp: true`, `seed: 0`, `deterministic: true`,
+`close_mosaic: 10`).
 
 ```bash
-# YOLO26s-OBB @ 1024 + rotation  ->  runs/obb/mar20_yolo26s_l40s_1024   (current model, L40S)
+# YOLO26s-OBB @ 1024 + rotation  ->  runs/obb/mar20_yolo26s_l40s_1024   (CURRENT MODEL, L40S)
+# Same command as n - only --model and --name differ.
 python train_yolo_obb.py --model yolo26s-obb.pt --epochs 200 --patience 60 \
     --imgsz 1024 --batch 32 --device 0 --workers 16 \
     --cache ram --degrees 180 --cos-lr --name mar20_yolo26s_l40s_1024
@@ -85,7 +86,7 @@ Two defaults matter for reproduction:
 The two runs differ **only** in `--model` (nano vs small) and `--name`: batch, image size, cache, workers,
 augmentation, schedule and seed are identical, so the n → s comparison is a controlled capacity test.
 
-### Resolved hyperparameters (identical for both runs)
+### Resolved hyperparameters (identical for the n and s runs)
 
 Dumped from each run's `args.yaml`:
 
@@ -133,9 +134,6 @@ around 5% MFU, which is expected for a 10.5 M-parameter detector.
 |------|------------|
 | nano | `yolo26n-obb.pt` |
 | small | `yolo26s-obb.pt` |
-| medium | `yolo26m-obb.pt` |
-| large | `yolo26l-obb.pt` |
-| x-large | `yolo26x-obb.pt` |
 
 YOLO26-OBB removes DFL regression and runs **NMS-free end-to-end** inference, so post-processing cost no
 longer scales with the number of boxes. That matters here: dense airfields generate hundreds of
@@ -145,25 +143,50 @@ overlapping OBBs, exactly where NMS dominates latency.
 
 ## Validation Results
 
-> **Current model:** `runs/obb/mar20_yolo26s_l40s_1024` – YOLO26s-OBB trained at 1024 with rotation
-> augmentation. Validated with
+> **Current model:** `runs/obb/mar20_yolo26s_l40s_1024` – YOLO26s-OBB (10.54 M params), same 1024 recipe.
+> `best.pt` (epoch 100 of 160) scores **mAP@0.5 0.8914 / mAP@0.5:0.95 0.7862**, P 0.8636, R 0.8420, with a
+> 60-epoch level of **0.8660 / 0.7626** and 15 of 160 epochs within 0.01 of its peak. Validated with
 > `python test_model.py --model runs/obb/mar20_yolo26s_l40s_1024/weights/best.pt --val`
-> (the script reads `imgsz` from the run's `args.yaml`) over all 2,511 val images / 14,471 instances:
-> **mAP@0.5 0.8914 / mAP@0.5:0.95 0.7862**, P 0.8636, R 0.8420.
+> (the script reads `imgsz` from the run's `args.yaml`) over all 2,511 val images / 14,471 instances. It is
+> the deployment candidate for the Jetson Orin Nano and the cheapest good model in the repo.
+
+> **Capacity ablation:** `runs/obb/mar20_yolo26n_l40s_1024` – YOLO26n-OBB (2.65 M params), identical command
+> and recipe. `best.pt` (epoch 108 of 168) scores **mAP@0.5 0.8708 / mAP@0.5:0.95 0.7620**, P 0.8258,
+> R 0.8223, with a 60-epoch level of **0.8534 / 0.7465**.
 
 ### Benchmark across backbone scales
 
 Both rows use the identical command, the same split, the same decoder and the same hyperparameters; only
-the backbone scale changes. They are therefore a like-for-like capacity comparison.
+the backbone scale changes, so they are a like-for-like capacity comparison.
 
 | Model | Input | Params | mAP@0.5 | mAP@0.5:0.95 | Precision | Recall | Inference |
 |-------|-------|--------|---------|--------------|-----------|--------|-----------|
 | YOLO26n-OBB + rot aug | 1024 | 2.65 M | 0.8708 | 0.7620 | 0.8258 | 0.8223 | – |
-| **YOLO26s-OBB + rot aug** | **1024** | 10.54 M | **0.8914** | **0.7862** | **0.8636** | **0.8420** | 4.0 ms |
+| **YOLO26s-OBB + rot aug** | **1024** | **10.54 M** | **0.8914** | **0.7862** | **0.8636** | **0.8420** | 4.0 ms |
 
 Going from nano to small (4× the parameters) buys **+0.0206 mAP@0.5** and **+0.0242 mAP@0.5:0.95**, plus
 **+0.0378 precision** and **+0.0197 recall**. Unlike a pure width step on a downscaled input, here the
 larger backbone wins on *every* metric, so capacity is still buying real accuracy at this resolution.
+
+### Peak vs converged level (both scales)
+
+Best-epoch numbers are what `best.pt` holds; the "level" is a mean ± std over a window of the run's own
+epochs. That window is the honest estimator, because best-epoch selection is a maximum taken over exactly
+this kind of jitter. Both windows are 60 epochs.
+
+| Model | Best epoch | Level window | Peak mAP50 | Peak mAP50-95 | Level mAP50 | Level mAP50-95 | Level P | Level R | Epochs ≥ 0.90 | Within 0.01 of peak |
+|-------|-----------|--------------|------------|---------------|-------------|----------------|---------|---------|---------------|---------------------|
+| YOLO26n-OBB | 108 (of 168) | last 60 | 0.8708 | 0.7620 | 0.8534 ± 0.0039 | 0.7465 ± 0.0034 | 0.8239 | 0.7897 | 0 | 16 / 168 |
+| **YOLO26s-OBB** | **100 (of 160)** | **last 60** | **0.8914** | **0.7862** | **0.8660 ± 0.0086** | **0.7626 ± 0.0076** | **0.8554** | **0.8270** | **0** | **15 / 160** |
+
+Read across the level columns:
+
+- **n → s holds up.** +0.0126 level mAP@0.5 and +0.0161 level mAP@0.5:0.95, which is roughly 1.5–2× the
+  wider of the two runs' epoch-to-epoch spread, and the ordering survives either way of measuring it
+  (peak: +0.0206 / +0.0242, level: +0.0126 / +0.0161). Still one run per scale, so treat it as a signal
+  with a plausible sign, not as a constant.
+- **Neither run's peak is a plateau.** Only **15 of 160** s epochs land within 0.01 of its peak and
+  **16 of 168** for n; the honest figure to quote for either model is the level column, not the best epoch.
 
 YOLO26n has no inference timing listed: it was not timed at 1024. The s figure (4.0 ms inference, ~6 ms
 per image end-to-end) was measured by the L40S validation pass, so it is a training-card number, not an
@@ -274,8 +297,8 @@ The failures are concentrated in the fighter block, and they are **two different
   `cos_lr`, `patience 60`, `seed 0`), identical hardware; only capacity differs.
 - **Input-size caveat:** the 1024 models were validated at 1024 because `test_model.py` reads `imgsz` from
   the run's `args.yaml`. Scoring them at any other size understates them and is not comparable.
-- **All numbers come from `args.yaml`-recorded runs** (`mar20_yolo26n_l40s_1024`,
-  `mar20_yolo26s_l40s_1024`), so hyperparameters are auditable rather than asserted.
+- **Both runs were launched from the same command**, so hyperparameters are auditable from the
+  reproduction block rather than asserted.
 - **Same training hardware for both runs** (NVIDIA L40S 48 GB). Training hardware does not change the
   weights' quality, but cuDNN/cuBLAS kernel selection means `seed: 0` + `deterministic: true` does **not**
   give bit-identical reproduction across GPUs. Expect ±1e-3 wobble in the metrics on a different card.
@@ -356,7 +379,7 @@ Classes grouped by mAP@0.5. Numbers are the validation pass quoted above.
 ## Why the Fighter Gap Exists
 
 1. **Planform similarity** – all modern fighters are single/double-seat, swept-wing, single/double-tail. The difference between an F-16 and SU-35 from 800 km up is a few pixels of wing sweep.
-2. **Scale** – fighters are 15–20 m long. At 0.3–0.5 m/px they occupy ~48×48 pixels at a 1024×1024 input. Quadrupling the parameters moved the aggregate mAP@0.5 by +0.0206 and left F-15 at 0.617 and F-22 at 0.600, which is the signature of a data/ambiguity limit rather than a capacity limit.
+2. **Scale** – fighters are 15–20 m long. At 0.3–0.5 m/px they occupy ~48×48 pixels at a 1024×1024 input. Quadrupling the parameters (n → s) moved the aggregate mAP@0.5 by +0.0206 and left F-15 at 0.617 and F-22 at 0.600, which reads as a data/ambiguity limit rather than a capacity limit.
 3. **Feature asymmetry** – the model learns strong features for bombers (wing config, engine count, size) that don't exist for fighters.
 4. **Not data starvation** – at 1024 the correlation between class instance count and mAP@0.5 is **−0.055**. F-22 has 418 val instances and scores 0.600; TU-160 has 334 and scores 0.969. The difference tracks how distinguishable the airframe is, not how many examples exist.
 5. **Operating point** – F-15 (P 0.723 / R 0.521) and F/A-18 (P 0.974 / R 0.556) are recall-limited at the default confidence, not incapable. F-16 (P 0.699) and F-22 (P 0.493) are precision-limited.
@@ -369,7 +392,7 @@ sample distance (F-15 0.617, F-22 0.600).
 
 ## Architecture Strategy
 
-**Phase 1 – Scale up YOLO26-OBB:** done for n and s. YOLO26s-OBB (10.54 M params) at 1024 with rotation
+**Phase 1 – Scale up YOLO26-OBB:** done. YOLO26s-OBB (10.54 M params) at 1024 with rotation
 augmentation reaches mAP@0.5 0.8914 / mAP@0.5:0.95 0.7862, beating YOLO26n-OBB trained with the identical
 command on every metric (+0.0206 mAP@0.5, +0.0378 precision, +0.0197 recall). Fighters still cap the
 average: the class mean of the 14 non-fighter classes is 0.942, against 0.891 overall.
@@ -379,15 +402,14 @@ reported runs; the pixel budget is what let the small classes move at all, and t
 nano confirms the gain tracks capacity as well as pixels – resolution is a multiplier on the parameters you
 already have.
 
-**Phase 3 – Edge deployment and benchmarking:** the 1024 checkpoint is the final model. Next step is
-deploying it to an **NVIDIA Jetson Orin Nano 8GB** and benchmarking on-device performance (see Edge
-Deployment below). Note the deployment target is a 8 GB shared-memory module while the model was trained
-at 1024; FP16 TensorRT at batch 1 is the variant most likely to fit comfortably.
+**Phase 3 – Edge deployment and benchmarking:** YOLO26s-OBB (10.54 M) is the deliverable: the target is an
+**NVIDIA Jetson Orin Nano 8GB** and 8 GB of shared memory is the binding constraint before compute is. FP16
+TensorRT at batch 1 is the variant most likely to fit comfortably.
 
 | Stage       | Model                          | Role                                              | Status        |
 |-------------|--------------------------------|---------------------------------------------------|---------------|
-| Scaled      | YOLO26n-OBB @ 1024 + rot aug   | NMS-free head, small-object regression, capacity check | ✅ mAP50 0.871 / 0.762 |
-| **Current** | **YOLO26s-OBB @ 1024 + rot aug** | **Final model: width + resolution + rotation**  | ✅ **mAP50 0.891 / 0.786** |
+| Scaled      | YOLO26n-OBB @ 1024 + rot aug   | NMS-free head, small-object regression, capacity check | ✅ mAP50 0.871 / 0.762 (level 0.853 / 0.747) |
+| **Current** | **YOLO26s-OBB @ 1024 + rot aug** | **Width + resolution + rotation; cheapest good model, headline model** | ✅ **mAP50 0.891 / 0.786 (level 0.866 / 0.763)** |
 | Deployment  | YOLO26s-OBB on Jetson Orin Nano | TensorRT export, on-device benchmark + paper      | ⬜ Next |
 
 ---
@@ -416,8 +438,9 @@ mAP@0.5 / mAP@0.5:0.95 parity against the desktop checkpoint.
 
 ## Next Steps
 
-The training work is done: YOLO26s-OBB at 1024 with rotation augmentation is the final model at
-**0.8914 mAP@0.5 / 0.7862 mAP@0.5:0.95**. What remains is deployment, evaluation hygiene, and writing.
+The headline model is YOLO26s-OBB at 1024 with rotation augmentation: **0.8914 mAP@0.5 / 0.7862 mAP@0.5:0.95**
+at `best.pt` (epoch 100 of 160), with a 60-epoch level of 0.8660 / 0.7626. What remains is deployment,
+evaluation hygiene, and writing.
 
 1. **Export and benchmark on Jetson Orin Nano 8GB** – `best.pt` → ONNX → TensorRT FP16/INT8, measure
    latency, FPS, power, and memory per variant.
@@ -432,9 +455,9 @@ The training work is done: YOLO26s-OBB at 1024 with rotation augmentation is the
 5. **Per-class confidence calibration** – the cheap, no-retraining win: F-15 (P 0.723 / R 0.521),
    F/A-18 (P 0.974 / R 0.556), KC-10 (P 0.554 / R 0.804) and E-8 (P 0.850 / R 0.815) are all sitting on a
    badly-placed operating point. Tune the conf threshold per class and re-report mAP.
-6. **Optional: F-22 targeted work** – still the weakest class at 0.600 with precision 0.493. More pixels did
-   not help, so the remaining levers are hard-negative mining against the other twin-tail fighters or an
-   upstream crop-and-reclassify stage, not another training run at this config.
+6. **Optional: F-22 targeted work** – still the weakest class at 0.600 with precision 0.493. More pixels
+   did not help, so the remaining levers are hard-negative mining against the other twin-tail fighters or
+   an upstream crop-and-reclassify stage.
 
 ---
 
@@ -445,9 +468,9 @@ The training work is done: YOLO26s-OBB at 1024 with rotation augmentation is the
 | `train_yolo_obb.py` | Conversion + training. Defaults to `yolo26n-obb.pt`, `--epochs 100`, `--patience 20`, `--batch 16`, `--imgsz 640`. Also passes through `--cache`, `--cos-lr`, `--degrees`, `--close-mosaic`, `--lr0`, `--optimizer`, `--seed`, `--no-amp`, `--rect`; `--model` selects another YOLO26-OBB variant |
 | `test_model.py` | Validation, single-image prediction, batch inference on any YOLO26-OBB checkpoint (`--model` to choose). Reads `imgsz` from the run's `args.yaml` (override with `--imgsz`) |
 | `benchmark_detection.py` | Class-agnostic detection benchmark (IoU / centre-offset / angle error, conf sweep) on any YOLO26-OBB checkpoint |
-| `runs/obb/mar20_yolo26s_l40s_1024/` | **Current model** – YOLO26s-OBB @ 1024 with rotation augmentation. Curves, confusion matrix, val batches, `best.pt` (weights git-ignored) |
+| `runs/obb/mar20_yolo26s_l40s_1024/` | **Current model** – YOLO26s-OBB @ 1024 with rotation augmentation, the cheapest good model and the Jetson candidate. Curves, confusion matrix, val batches, `best.pt` (weights git-ignored) |
 | `runs/obb/mar20_yolo26n_l40s_1024/` | YOLO26n-OBB @ 1024 with rotation augmentation – the capacity ablation for the row above, same command, `best.pt` = epoch 108 |
-| `logs/train_l40s_1024.log`, `logs/val_1024.txt` | Full training transcript and final validation output for the current model |
+| `logs/train_l40s_1024.log`, `logs/val_1024.txt` | Full training transcript and final validation output for YOLO26s (current model) |
 | `yolo_obb_dataset/mar20_obb.yaml` | Dataset config (auto-generated, path fixed to this checkout) |
 
 ---

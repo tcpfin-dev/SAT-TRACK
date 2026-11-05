@@ -18,11 +18,12 @@ venv/
 !best.pt
 
 # Downloaded checkpoints + generated dataset yaml
-/mar20_obb.yaml
+/mar20_obb.yam
 /weights/
 
 # YOLO training runs (keep val images for README, ignore weights + predictions)
 runs/obb/predict/
+runs/obb/mar20_yolo26m_l40s_1024/*
 
 # IDE
 .vscode/
