@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 
+# Internal logs
+logs/
+
 # Crush
 .crush/
 
@@ -23,7 +26,6 @@ venv/
 
 # YOLO training runs (keep val images for README, ignore weights + predictions)
 runs/obb/predict/
-runs/obb/mar20_yolo26m_l40s_1024/*
 
 # IDE
 .vscode/
