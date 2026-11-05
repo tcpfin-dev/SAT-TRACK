@@ -484,25 +484,26 @@ Current model (YOLO26m @ 1024, 2× L40S):
 ### Validation Predictions
 
 > Hand-picked best frames from the 2,511-image val split, one per scene type: every panel below is
-> 0 false positive, 0 missed aircraft and 0 misclassifications at IoU 0.5, and together they cover all 20
-> classes. The aggregate numbers above are the honest measure; these are the cleanest illustrations of
-> them. Ground truth left, predictions right, all in `runs/obb/yolo26m-predict/preview/`.
+> 0 false positive, 0 missed aircraft and 0 misclassifications at IoU 0.5, 7 to 21 aircraft per frame, and
+> a mean quad IoU of 0.84 to 0.92. Together they cover all 20 classes. The aggregate numbers above are the
+> honest measure; these are the cleanest illustrations of them. Ground truth left, predictions right, all
+> in `runs/obb/yolo26m-predict/preview/`.
 
-| Scene | Aircraft | Detection | Mean IoU | Panel |
-|-------|----------|-----------|----------|-------|
-| F/A-18 Hornet, densest fighter row (20 aircraft) | F-A-18 x20 | 20/20 TP, 0 FP, 0 FN | 0.906 | ![F/A-18 row](runs/obb/yolo26m-predict/preview/panel_01_fa18_carrier_deck.jpg) |
-| C-5 Galaxy airlift line, most objects in the set (21) | C-5 x21 | 21/21 TP, 0 FP, 0 FN | 0.857 | ![C-5 row](runs/obb/yolo26m-predict/preview/panel_02_c5_galaxy_row.jpg) |
-| SU-35 / SU-34 / SU-24 mixed fighter apron (16) | SU-24 x9, SU-34 x4, SU-35 x3 | 16/16 TP, 0 FP, 0 FN | 0.846 | ![Russian fighters](runs/obb/yolo26m-predict/preview/panel_03_russian_fighters.jpg) |
-| TU-160 / TU-22 / TU-95 strategic bombers (12) | TU-95 x6, TU-160 x5, TU-22 x1 | 12/12 TP, 0 FP, 0 FN | 0.869 | ![Russian bombers](runs/obb/yolo26m-predict/preview/panel_04_russian_bombers.jpg) |
-| Four heavy types in one frame (11) | F-15 x6, C-130 x2, KC-135 x2, B-52 x1 | 11/11 TP, 0 FP, 0 FN | 0.855 | ![Mixed heavy](runs/obb/yolo26m-predict/preview/panel_05_mixed_heavy.jpg) |
-| Airlift and tankers, sparse scene (7) | KC-10 x3, KC-135 x2, C-17 x1, C-5 x1 | 7/7 TP, 0 FP, 0 FN | 0.858 | ![Airlift and tankers](runs/obb/yolo26m-predict/preview/panel_06_airlift_tankers.jpg) |
-| E-3 Sentry AWACS row (10) | E-3 x10 | 10/10 TP, 0 FP, 0 FN | 0.915 | ![E-3 row](runs/obb/yolo26m-predict/preview/panel_07_e3_awacs.jpg) |
-| B-52 Stratofortress fleet (14) | B-52 x14 | 14/14 TP, 0 FP, 0 FN | 0.891 | ![B-52 fleet](runs/obb/yolo26m-predict/preview/panel_08_b52_fleet.jpg) |
-| F-22 Raptor line (12) | F-22 x12 | 12/12 TP, 0 FP, 0 FN | 0.838 | ![F-22 row](runs/obb/yolo26m-predict/preview/panel_09_f22_raptors.jpg) |
-| F-16 Falcon apron (16) | F-16 x16 | 16/16 TP, 0 FP, 0 FN | 0.878 | ![F-16 apron](runs/obb/yolo26m-predict/preview/panel_10_f16_falcons.jpg) |
-| E-8 JSTARS row (12) | E-8 x12 | 12/12 TP, 0 FP, 0 FN | 0.922 | ![E-8 row](runs/obb/yolo26m-predict/preview/panel_11_e8_jstars.jpg) |
-| B-1B Lancer fleet (14) | B-1B x14 | 14/14 TP, 0 FP, 0 FN | 0.862 | ![B-1B fleet](runs/obb/yolo26m-predict/preview/panel_12_b1b_lancers.jpg) |
-| P-3C Orion row (16) | P-3C x16 | 16/16 TP, 0 FP, 0 FN | 0.881 | ![P-3C row](runs/obb/yolo26m-predict/preview/panel_13_p3c_orions.jpg) |
+| Scene and aircraft | Panel |
+|--------------------|-------|
+| F/A-18 Hornet x20, densest fighter row | ![F/A-18 row](runs/obb/yolo26m-predict/preview/panel_01_fa18_carrier_deck.jpg) |
+| C-5 Galaxy x21, biggest airlift line in the set | ![C-5 row](runs/obb/yolo26m-predict/preview/panel_02_c5_galaxy_row.jpg) |
+| SU-24 x9, SU-34 x4, SU-35 x3, mixed fighter apron | ![Russian fighters](runs/obb/yolo26m-predict/preview/panel_03_russian_fighters.jpg) |
+| TU-95 x6, TU-160 x5, TU-22 x1, strategic bombers | ![Russian bombers](runs/obb/yolo26m-predict/preview/panel_04_russian_bombers.jpg) |
+| F-15 x6, C-130 x2, KC-135 x2, B-52 x1, four heavy types in one frame | ![Mixed heavy](runs/obb/yolo26m-predict/preview/panel_05_mixed_heavy.jpg) |
+| KC-10 x3, KC-135 x2, C-17 x1, C-5 x1, airlift and tankers, sparse | ![Airlift and tankers](runs/obb/yolo26m-predict/preview/panel_06_airlift_tankers.jpg) |
+| E-3 Sentry x10, AWACS row | ![E-3 row](runs/obb/yolo26m-predict/preview/panel_07_e3_awacs.jpg) |
+| B-52 x14, Stratofortress fleet | ![B-52 fleet](runs/obb/yolo26m-predict/preview/panel_08_b52_fleet.jpg) |
+| F-22 Raptor x12 | ![F-22 row](runs/obb/yolo26m-predict/preview/panel_09_f22_raptors.jpg) |
+| F-16 Falcon x16 | ![F-16 apron](runs/obb/yolo26m-predict/preview/panel_10_f16_falcons.jpg) |
+| E-8 JSTARS x12 | ![E-8 row](runs/obb/yolo26m-predict/preview/panel_11_e8_jstars.jpg) |
+| B-1B Lancer x14 | ![B-1B fleet](runs/obb/yolo26m-predict/preview/panel_12_b1b_lancers.jpg) |
+| P-3C Orion x16 | ![P-3C row](runs/obb/yolo26m-predict/preview/panel_13_p3c_orions.jpg) |
 
 The last five rows are the hard-class frames: F-22 (0.615 mAP@0.5, the only class the backbone cannot
 fix), F-16 (0.840), E-8 (0.866), B-1B (0.989) and P-3C (0.975). They are not the model's average behaviour
