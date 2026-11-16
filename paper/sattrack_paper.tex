@@ -1,6 +1,15 @@
 \documentclass[conference]{IEEEtran}
 \IEEEoverridecommandlockouts
 
+% ---------------------------------------------------------------------------
+% Submission metadata (for the CMT form; not typeset)
+% Primary area:   Artificial intelligence and machine learning-based multimedia
+% Secondary area: Image and video processing
+% Keywords:       Oriented Object Detection; Fine-Grained Object Recognition;
+%                 YOLO; Model Capacity/Scaling; Failure-Mode Analysis;
+%                 Remote Sensing
+% ---------------------------------------------------------------------------
+
 \usepackage{cite}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
@@ -11,10 +20,16 @@
 
 \graphicspath{{figs/}}
 
+\hypersetup{
+  pdftitle={Capacity-Dependent Failure Modes in Fine-Grained Oriented Object Detection},
+  pdfkeywords={oriented object detection, fine-grained object recognition, YOLO,
+    model capacity and scaling, failure-mode analysis, remote sensing}
+}
+
 \begin{document}
 
-\title{Capacity Scaling of YOLO26-OBB for Oriented Military
-Aircraft Detection in Satellite Imagery: A Case Study on MAR20}
+\title{Capacity-Dependent Failure Modes in Fine-Grained Oriented Object
+Detection: A Diagnostic Study of YOLO26-OBB on MAR20}
 
 \author{
 \IEEEauthorblockN{Author Name}
@@ -26,194 +41,252 @@ email@example.com}
 \maketitle
 
 \begin{abstract}
-Detecting and classifying individual military aircraft in overhead imagery requires
-oriented bounding boxes (OBB): parked aircraft sit at arbitrary azimuths, and a
-horizontal box conflates neighbouring airframes on a dense apron. We report a
-controlled capacity study of the YOLO26-OBB detector family on the MAR20
-benchmark, where twenty aircraft classes are annotated with oriented quadrilaterals.
-Three backbone scales (nano, small, medium) are trained with an identical recipe at
-$1024\times1024$ input with full $180^\circ$ rotation augmentation, differing only in
-capacity; the medium-scale model is trained under two-GPU distributed data parallel.
-Accuracy increases monotonically with capacity on every aggregate metric, reaching
-mAP@0.5 of 0.916 and mAP@0.5:0.95 of 0.801 for the medium model, against 0.891/0.786
-for small and 0.871/0.762 for nano. Per-class analysis shows that the gain is
-concentrated in two recall-limited fighter classes, while the single precision-limited
-class is unaffected by a doubling of parameters. We argue this separates two failure
-modes that aggregate mAP hides: failing to \emph{find} a small airframe, which is
-capacity-bound, and failing to \emph{identify} it, which is not. We also report
-converged-window statistics alongside best-epoch figures, because the gap between the
-two is large enough to change how the results should be read.
+Capacity-scaling studies of object detectors usually report a single accuracy
+delta and leave the composition of that delta unexamined. We argue that for
+fine-grained oriented detection the composition is the result: added capacity is
+failure-mode-selective, repairing some error channels and leaving others
+untouched, and an aggregate number cannot distinguish them. We test this on
+MAR20, twenty military aircraft classes annotated with oriented boxes, using a
+controlled YOLO26-OBB ladder (nano, small, medium) trained under one recipe at
+$1024$~px with full rotation augmentation. Aggregate accuracy rises
+monotonically, to mAP@0.5 of 0.916 and mAP@0.5:0.95 of 0.801 at the medium
+scale. A per-class decomposition shows the gain is not distributed: fifteen
+classes move by at most 0.03, four fighter classes contribute $79\%$ of the
+aggregate gain, and the two largest improvements are recall-limited fighters
+(F-15 $+0.234$, F/A-18 $+0.113$ mAP@0.5). A twin-tail fighter that fails by
+misidentification is unaffected by the same doubling (F-22 $0.600\rightarrow
+0.615$, precision $0.493\rightarrow0.451$). We formalise the decomposition into
+three channels, missed detections, identity confusion, and localisation error,
+and show that capacity cuts the fighter miss rate by 10.4 points while leaving
+the share of error attributable to localisation invariant (mAP@0.5:0.95 /
+mAP@0.5 $=0.88$ at both scales). Scaling buys detection completeness; the
+identity and localisation channels are at best weakly responsive to it.
+Aggregate mAP cannot tell these apart, so
+a capacity study that reports only mAP is mis-specified as evidence for or
+against scaling.
 \end{abstract}
 
 \begin{IEEEkeywords}
-oriented object detection, remote sensing, aircraft recognition, YOLO, capacity
-scaling, MAR20
+oriented object detection, fine-grained object recognition, YOLO, model capacity
+and scaling, failure-mode analysis, remote sensing
 \end{IEEEkeywords}
 
 \section{Introduction}
 
-Monitoring airbases from orbit is a routine remote-sensing task with applications in
-fleet counting, activity assessment, and change detection. The interesting quantity is
-rarely ``is there an aircraft'' but ``which aircraft, and how many of each''. That
-makes the problem instance-level detection with fine-grained classification, on
-targets that are small, densely packed, and viewed from directly above.
+Monitoring airbases from orbit is a routine remote-sensing task with applications
+in fleet counting, activity assessment, and change detection. The useful quantity
+is rarely ``is there an aircraft'' but ``which aircraft, and how many of each''.
+That makes the problem instance-level detection with fine-grained classification,
+on targets that are small, densely packed, and viewed from directly above.
+Oriented bounding boxes (OBB) suit the geometry: they separate aircraft parked in
+rows, retain heading, and avoid the arbitrary pairing of targets that a
+horizontal box forces on a dense apron. At the same time, the classification
+signal is thin. A fighter is roughly $48\times48$ pixels at a $1024$~px input, so
+the discriminative evidence is a few pixels of wing sweep and tail arrangement.
 
-Two properties of this setting shape the design space. First, orientation is
-informative and horizontal boxes discard it: a $50$~m bomber and a $15$~m fighter
-rotated a few degrees can share a horizontal box, and adjacent aircraft in a row
-overlap heavily under axis-aligned parameterisation. Oriented bounding boxes remove
-both problems and additionally give a heading estimate, which is what an analyst
-actually wants when reading a flight line. Second, the targets are small in absolute
-terms. A fighter is roughly $48\times48$ pixels at a $1024$~px input, so the
-discriminative signal available for classification is a few pixels of wing sweep and
-tail arrangement.
+A detector that fails here can fail in more than one way, and the ways have
+different remedies. It can miss an airframe entirely, in which case recall is low
+and more capacity, a lower operating threshold, or better augmentation may help.
+It can find an airframe and assign it the wrong class, in which case precision is
+low, recall is not, and no amount of threshold tuning fixes it; the planforms are
+simply not separable at the available ground sample distance. Or it can find and
+name the aircraft correctly but place the oriented box loosely, which costs
+accuracy at strict IoU while leaving IoU-0.5 metrics intact. These three channels
+are distinct failure modes, they call for different interventions, and standard
+benchmark reporting collapses all of them into one number.
 
-Recent single-stage oriented detectors handle the geometry well, and the YOLO family
-in its OBB variant has made them cheap to train and deploy. What is less well
-documented is how accuracy responds to backbone capacity at a fixed, generous input
-resolution, and whether the residual errors of such a detector are uniform across
-classes or structurally concentrated. The second question matters more than the first
-for anyone planning a deployment: a model whose remaining errors are all
-detection failures can be helped by capacity, better augmentation, or a lower
-operating threshold, whereas a model whose errors are identity confusions needs a
-different intervention entirely.
+This paper treats a capacity ladder as an instrument for separating those
+channels rather than as a leaderboard entry. The question is not whether the
+larger backbone scores higher, which it does, but which error channel absorbs the
+added parameters. The answer is sharp enough to be actionable: capacity buys
+detection completeness on the fighter block and almost nothing else. Identity
+confusion between twin-tail fighters and the relative localisation error survive
+a doubling of parameters essentially intact. That asymmetry, not the headline
+mAP, is what should inform a deployment decision.
 
-This paper contributes:
+Our contributions are:
 \begin{itemize}
-\item a controlled three-rung capacity ladder (nano, small, medium) for YOLO26-OBB on
-MAR20, trained with a single identical recipe and identical augmentation, so that the
-only free variable is backbone width;
-\item a per-class analysis that resolves the aggregate gain into two distinct failure
-modes, one of which is capacity-bound and one of which is not;
-\item accuracy reporting that pairs best-epoch values with converged-window
-statistics, and a discussion of why the former overstates performance under
-early-stopping;
-\item measured training throughput and inference latency for all three scales on the
-same hardware.
+\item a three-channel diagnostic framing for fine-grained oriented detection
+(missed detection, identity confusion, localisation error), expressible with
+precision, recall, and the ratio of strict-IoU to IoU-0.5 mAP, so it needs no
+per-instance error annotation;
+\item a controlled three-rung capacity ladder (nano, small, medium) for
+YOLO26-OBB on MAR20, trained with one recipe and one augmentation policy, so the
+only free variable is backbone capacity;
+\item evidence that capacity is channel-selective: the fighter miss rate falls by
+10.4 points from small to medium, while the localisation share of error and the
+identity-limited class are invariant, and $79\%$ of the aggregate gain comes from
+four of twenty classes;
+\item a cost accounting of the repaired channel in parameters and latency, paired
+with converged-window statistics that keep best-epoch selection from being
+mistaken for a capacity effect.
 \end{itemize}
 
 The remainder is organised as follows. Section~\ref{sec:related} places the work
-relative to oriented detection and to aircraft-recognition benchmarks.
-Section~\ref{sec:method} describes the dataset, the detector, and the training recipe.
-Section~\ref{sec:setup} states the experimental protocol.
-Section~\ref{sec:results} reports results and the per-class analysis.
-Section~\ref{sec:limits} discusses limitations, and Section~\ref{sec:concl}
-concludes.
+relative to oriented detection, aircraft recognition, error diagnosis, and
+scaling studies. Section~\ref{sec:method} describes the dataset, the detector,
+and the diagnostic taxonomy. Section~\ref{sec:setup} states the protocol.
+Section~\ref{sec:results} reports the decomposition. Section~\ref{sec:limits}
+discusses limitations, and Section~\ref{sec:concl} concludes.
 
 \section{Related Work}
 \label{sec:related}
 
 \subsection{Generic and oriented detection}
-Two-stage and single-stage detectors with axis-aligned boxes are mature
-\cite{redmon2016,lin2017focal,tian2019fcos,zhou2019objects}. Oriented detection
-developed largely around aerial imagery, where the DOTA benchmark
-\cite{xia2018dota} established the task and evaluation protocol. Rotated region
-proposals \cite{ding2019roitransformer}, rotation-equivariant backbones
-\cite{han2021redet}, and refined single-stage heads \cite{yang2021r3det} each address
-a different part of the problem: proposal alignment, feature equivariance, and
-iterative box refinement respectively. The YOLO-OBB variant takes the opposite
-engineering direction: keep a single-stage anchor-free head and accept a coarser
-angle estimate in exchange for a simple, fast pipeline. Removing non-maximum
-suppression entirely, as recent end-to-end heads do, is particularly relevant here
-because dense aprons produce hundreds of mutually overlapping oriented boxes, which
-is exactly the regime where suppression cost dominates.
+Axis-aligned detectors are mature
+\cite{redmon2016,lin2017focal,tian2019fcos,zhou2019objects}, and oriented
+detection developed around aerial imagery, where DOTA \cite{xia2018dota}
+established the task and protocol. Rotated region proposals
+\cite{ding2019roitransformer}, rotation-equivariant backbones \cite{han2021redet},
+and refined single-stage heads \cite{yang2021r3det} address proposal alignment,
+feature equivariance, and iterative box refinement respectively. The YOLO-OBB
+variant takes the opposite direction: a single-stage anchor-free head with a
+coarser angle estimate in exchange for a simple, fast pipeline. Removing
+non-maximum suppression, as recent end-to-end heads do, matters here because
+dense aprons produce hundreds of mutually overlapping boxes, exactly the regime
+where suppression either costs time or deletes true positives.
 
 \subsection{Aircraft recognition in overhead imagery}
-Fine-grained aircraft recognition has its own literature, driven by the difficulty of
-separating planforms that differ by a few pixels at the available ground sample
-distance. MAR20 \cite{yu2021mar20} is the reference benchmark for military aircraft:
-twenty classes spanning US, Russian, and allied types, annotated with oriented boxes,
-collected to stress exactly the fine-grained regime. Reported results on MAR20 are
-typically high for large multi-engine airframes and substantially lower for
-single-engine fighters, which is the pattern our per-class results reproduce and, we
-argue, partly explain.
+Fine-grained aircraft recognition is difficult because planforms differ by only a
+few pixels at the available ground sample distance. MAR20 \cite{yu2021mar20} is
+the reference benchmark for military aircraft: twenty classes spanning US,
+Russian, and allied types, annotated with oriented boxes and collected to stress
+exactly that regime. Reported results are high for large multi-engine airframes
+and substantially lower for single-engine fighters, the pattern our per-class
+results reproduce and partly explain.
+
+\subsection{Diagnosing detector error}
+Hoiem \emph{et al.} \cite{hoiem2012} introduced a diagnostic tool that separates
+detector mistakes into localisation, confusion, and missed-detection categories
+and showed that aggregate average precision conceals which category dominates.
+TIDE \cite{bolya2020} generalises this into a reusable toolbox with explicit
+per-error assignment and a single error budget. Both target axis-aligned
+detectors on natural images and treat the detector as fixed; capacity is not a
+controlled variable in either. Our framing borrows their decomposition but
+derives it from standard validation output, so it transfers to oriented
+detectors without per-instance error annotation, and we use it to characterise
+what scaling repairs rather than to compare two detectors.
 
 \subsection{Capacity scaling}
-Compound scaling studies \cite{tan2019efficientnet} and speed--accuracy analyses of
-detector families \cite{huang2017speed} established that accuracy is a smooth function
-of capacity only within a regime; past some point the binding constraint shifts from
-parameters to data, resolution, or label noise. Our ladder is designed to locate that
-shift for one detector family on one dataset, rather than to maximise accuracy.
+Compound scaling \cite{tan2019efficientnet} and speed--accuracy analyses of
+detector families \cite{huang2017speed} established that accuracy is a smooth
+function of capacity only within a regime; past some point the binding
+constraint shifts to data, resolution, or label noise. That literature locates
+the shift in aggregate accuracy, not in the error channels, which is the
+question we ask here.
 
 \section{Dataset and Method}
 \label{sec:method}
 
 \subsection{MAR20 and preprocessing}
-MAR20 comprises 3{,}842 satellite images covering twenty military aircraft classes:
-fighters (F-15, F-16, F-22, F/A-18, SU-24, SU-34, SU-35), bombers (B-1B, B-52, TU-22,
-TU-95, TU-160), transports (C-5, C-17, C-130), tankers (KC-10, KC-135), airborne
-early-warning aircraft (E-3, E-8), and maritime patrol (P-3C). Ground sample distance
-varies across scenes in the $0.3$--$0.5$~m range, which makes apparent object size a
-function of source scene as well as of aircraft type; this is one reason the benchmark
-is harder than its nominal resolution suggests.
+MAR20 comprises 3{,}842 satellite images covering twenty military aircraft
+classes: fighters (F-15, F-16, F-22, F/A-18, SU-24, SU-34, SU-35), bombers (B-1B,
+B-52, TU-22, TU-95, TU-160), transports (C-5, C-17, C-130), tankers (KC-10,
+KC-135), airborne early-warning aircraft (E-3, E-8), and maritime patrol (P-3C).
+Ground sample distance varies across scenes in the $0.3$--$0.5$~m range, which
+makes apparent object size a function of source scene as well as of aircraft
+type; this is one reason the benchmark is harder than its nominal resolution
+suggests.
 
 Annotations are oriented quadrilaterals in DOTA format. We convert them to the
 normalised eight-coordinate representation expected by the OBB head and remap the
-label indices to a fixed class order derived from the dataset configuration, so that
-class identity is stable across runs. The predefined split is used unmodified:
-1{,}331 training images and 2{,}511 validation images, with no airfield shared between
-the two. Instance counts are 7{,}870 and 14{,}471 respectively. The validation set is
-nearly twice the training set; we treat this as a property of the benchmark's
-predefined split rather than a choice.
+label indices to a fixed class order derived from the dataset configuration, so
+that class identity is stable across runs. The predefined split is used
+unmodified: 1{,}331 training images and 2{,}511 validation images, with no
+airfield shared between the two. Instance counts are 7{,}870 and 14{,}471
+respectively. The validation set is nearly twice the training set; we treat this
+as a property of the benchmark's predefined split rather than a choice.
 
 \subsection{Detector}
-We use YOLO26-OBB at three backbone scales. The head is anchor-free and
-end-to-end: non-maximum suppression is removed, and distribution-focal-loss
-regression is replaced with direct regression of box extent and rotation angle. For
-our setting both changes are operationally relevant. Removing suppression matters
-because dense rows of aircraft are precisely the case where suppression either costs
-time or, if made aggressive, deletes true positives. Direct angle regression is
-cheaper to train than a discretised angle distribution but gives a coarser heading
-estimate, which we accept: heading is a by-product of this work, not its objective.
+We use YOLO26-OBB \cite{ultralytics} at three backbone scales. The head is
+anchor-free and end-to-end: non-maximum suppression is removed, and
+distribution-focal-loss regression is replaced with direct regression of box
+extent and rotation angle.
+For our setting both changes are operationally relevant. Removing suppression
+matters because dense rows of aircraft are precisely the case where suppression
+either costs time or, if made aggressive, deletes true positives. Direct angle
+regression is cheaper to train than a discretised angle distribution but gives a
+coarser heading estimate, which we accept: heading is a by-product of this work,
+not its objective.
+
+\subsection{Failure-mode taxonomy}
+\label{sec:taxonomy}
+For a class $c$, let $P_c$ and $R_c$ be precision and recall at the default
+operating point, and let $\rho_c = \mathrm{mAP}^{0.5:0.95}_c /
+\mathrm{mAP}^{0.5}_c$ be the fraction of IoU-0.5 accuracy that survives the
+strict criterion. We read three channels from these quantities:
+\emph{missed detections} appear as a recall deficit $1-R_c$; \emph{identity
+confusion} appears as a precision deficit $1-P_c$ on detections that are made,
+and in the class-to-class confusion mass of the validation matrix;
+\emph{localisation error} appears as a low retention $\rho_c$, i.e.\ boxes that
+are found and named correctly but do not overlap the ground truth tightly.
+Retention is a relative quantity: it says what share of the detection-level
+accuracy is lost to geometry, independent of how many detections there were.
+It is therefore comparable across capacities, which raw mAP@0.5:0.95 is not.
+
+These are aggregate signatures, not per-instance assignments; a class can carry
+more than one at once. Their value is that the three respond to different
+interventions, so separating them changes what one would do next.
+
+The fine-grained OBB setting is a favourable testbed for this decomposition.
+Orientation removes the axis-alignment nuisance that usually dominates
+localisation error on aerial targets, background is rare (aircraft sit on apron,
+not in clutter), and the class set contains several planforms that are nearly
+identical at this ground sample distance. That makes the identity channel
+measurable instead of being masked by detection noise.
 
 \subsection{Training recipe}
 All three runs use one recipe, and differ only in the checkpoint that initialises
-training and in the number of GPUs used. Input resolution is $1024\times1024$;
-batch size is 32 in total; images are cached in RAM, removing per-epoch decode;
-mixed precision is enabled; the optimiser is selected automatically with an initial
-learning rate of 0.01 under a cosine schedule and three warmup epochs; the epoch
-budget is 200 with early stopping at a patience of 60 epochs on validation fitness;
-and mosaic is disabled for the final ten epochs so the model finishes on unaugmented
-geometry. Determinism is requested (fixed seed, deterministic kernels), which gives
-run-to-run stability on one device but not across devices (Section~\ref{sec:limits}).
+training and in the number of GPUs used. Input resolution is
+$1024\times1024$; batch size is 32 in total; images are cached in RAM, removing
+per-epoch decode; mixed precision is enabled; the optimiser is selected
+automatically with an initial learning rate of 0.01 under a cosine schedule and
+three warmup epochs; the epoch budget is 200 with early stopping at a patience of
+60 epochs on validation fitness; and mosaic is disabled for the final ten epochs
+so the model finishes on unaugmented geometry. Determinism is requested (fixed
+seed, deterministic kernels), which gives run-to-run stability on one device but
+not across devices (Section~\ref{sec:limits}).
 
-The one augmentation decision that is specific to this task is rotation. Because
-satellite azimuth is arbitrary and unrelated to the aircraft heading, we enable full
+The augmentation decision specific to this task is rotation. Because satellite
+azimuth is arbitrary and unrelated to aircraft heading, we enable full
 $180^\circ$ rotation rather than the small-angle jitter typical of ground-level
 detection. Combined with horizontal flips, mosaic, and standard photometric
-augmentation, this makes the training distribution approximately invariant to the
-symmetry the task actually has. Flipping vertically was left off as it duplicates
-the horizontal flip under $180^\circ$ rotation.
+augmentation, this makes the training distribution approximately invariant to
+the symmetry the task actually has. Flipping vertically was left off as it
+duplicates the horizontal flip under $180^\circ$ rotation.
 
 \section{Experimental Protocol}
 \label{sec:setup}
 
 \subsection{Hardware}
-The nano and small runs each used a single NVIDIA L40S (48~GB). The medium run used
-two L40S cards under distributed data parallel with 16 images per card, so the total
-batch seen by the optimiser is unchanged but gradients are averaged across devices.
+The nano and small runs each used a single NVIDIA L40S (48~GB). The medium run
+used two L40S cards under distributed data parallel with 16 images per card, so
+the total batch seen by the optimiser is unchanged but gradients are averaged
+across devices.
 
 \subsection{Metrics}
-We report standard detection metrics at IoU 0.5 and averaged over 0.5:0.95, together
-with precision and recall at the default operating point, in all cases class-averaged
-over the twenty classes. Because every run early-stopped and reports the checkpoint
-selected on the same validation split, we additionally report a
-\emph{converged level}: the mean and standard deviation of the metric over the final
-60 epochs of each run. This is the more honest estimator of what a retrained model of
-the same configuration would deliver, since best-epoch selection is a maximum taken
-over exactly the epoch-to-epoch jitter the level quantifies.
+We report standard detection metrics at IoU 0.5 and averaged over 0.5:0.95,
+together with precision and recall at the default operating point, in all cases
+class-averaged over the twenty classes, plus the retention ratio $\rho$ defined
+in Section~\ref{sec:taxonomy}. Because every run early-stopped and reports the
+checkpoint selected on the same validation split, we additionally report a
+\emph{converged level}: the mean and standard deviation of the metric over the
+final 60 epochs of each run. This is the more honest estimator of what a
+retrained model of the same configuration would deliver, since best-epoch
+selection is a maximum taken over exactly the epoch-to-epoch jitter the level
+quantifies.
 
 Latency is measured per image at batch size 1 on the training card, split into
-preprocessing, inference, and postprocessing. It is a datacenter-GPU number and is
-not a deployment figure.
+preprocessing, inference, and postprocessing. It is a datacenter-GPU number and
+is not a deployment figure.
 
 \subsection{Reproducibility}
-Every run is launched from the same script with the checkpoint and run name as the
-only varying arguments; the resolved hyperparameters are dumped into each run
-directory alongside the per-epoch metrics, so the recipe is auditable rather than
-asserted. Reported metrics are taken from a standalone validation pass over the full
-2{,}511-image split, separate from the training loop, and agree with the training
-log to the printed precision.
+Every run is launched from the same script with the checkpoint and run name as
+the only varying arguments; the resolved hyperparameters are dumped into each
+run directory alongside the per-epoch metrics, so the recipe is auditable rather
+than asserted. Reported metrics are taken from a standalone validation pass over
+the full 2{,}511-image split, separate from the training loop, and agree with the
+training log to the printed precision.
 
 \section{Results and Discussion}
 \label{sec:results}
@@ -250,35 +323,88 @@ Epochs $\geq 0.90$ & 0 & 0 & 17 \\
 \end{tabular}
 \end{table}
 
-\subsection{Aggregate behaviour}
-Table~\ref{tab:ladder} summarises the three runs. Accuracy is monotonic in capacity
-on every aggregate metric, and no rung trades one metric for another: nano to small,
-a fourfold increase in parameters, buys $+0.0206$ mAP@0.5 and $+0.0242$ mAP@0.5:0.95
-together with $+0.038$ precision and $+0.020$ recall; small to medium, a doubling,
-buys a further $+0.0246$ and $+0.0141$. Measured on the converged level instead, the
-steps are $+0.013$/$+0.016$ and $+0.023$/$+0.016$ respectively. Both readings agree in
-sign and order of magnitude, and each step exceeds the epoch-to-epoch spread of the
-larger of the two runs it compares, so the ordering is not an artefact of noise; with
-one run per scale, however, each step is a single observation rather than a
-distribution. The
-medium run is also the first configuration to cross 0.90 mAP@0.5 as a stable level
-rather than as a single epoch: 17 of its 102 epochs sit at or above 0.90.
+\subsection{Aggregate behaviour: a manipulation check}
+Table~\ref{tab:ladder} summarises the three runs. Accuracy is monotonic in
+capacity on every aggregate metric, and no rung trades one metric for another:
+nano to small, a fourfold increase in parameters, buys $+0.0206$ mAP@0.5 and
+$+0.0242$ mAP@0.5:0.95 together with $+0.038$ precision and $+0.020$ recall;
+small to medium, a doubling, buys a further $+0.0246$ and $+0.0141$. Measured on
+the converged level instead, the steps are $+0.013$/$+0.016$ and
+$+0.023$/$+0.016$ respectively. Both readings agree in sign and order of
+magnitude, and each step exceeds the epoch-to-epoch spread of the larger of the
+two runs it compares, so the ordering is not an artefact of noise; with one run
+per scale, however, each step is a single observation rather than a
+distribution. The medium run is also the first configuration to cross 0.90
+mAP@0.5 as a stable level rather than as a single epoch: 17 of its 102 epochs
+sit at or above 0.90.
 
-The monotonicity has a direct interpretation. At $1024$~px, accuracy in this regime is
-still capacity-bound rather than resolution-bound: the same pixels support a better
-model, and the medium run improves without any change to input size or augmentation.
-For a deployment with a compute budget, that means the resolution has already been
-spent well and the remaining trade is parameter count against latency.
+This is where a capacity study usually stops, and on its own it supports the
+usual conclusion, that accuracy at $1024$~px is capacity-bound rather than
+resolution-bound. We treat it as a manipulation check: the ladder behaves as a
+capacity ladder should, so the decomposition that follows compares something
+real. The medium run's validation fitness plateaus after epoch 42 and is not
+challenged for the following 60 epochs, so its level statistics describe a
+plateau rather than a degradation.
 
-\subsection{Where the gain comes from}
+\subsection{The aggregate gain is channel-selective}
+
+\begin{table}[t]
+\centering
+\caption{Error-channel diagnostics by class group, small versus medium. Miss is
+$1-R$; $\rho$ is mAP@0.5:0.95 divided by mAP@0.5, the share of IoU-0.5 accuracy
+retained at strict IoU. The fighter block is the four fighter classes; the
+remaining sixteen are bombers, transports, tankers, AEW, and maritime patrol.}
+\label{tab:channels}
+\setlength{\tabcolsep}{4pt}
+\footnotesize
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+Group & Scale & $P$ & $R$ & Miss & mAP@0.5 & $\rho$ \\
+\midrule
+Fighters (4) & s & 0.722 & 0.642 & 0.358 & 0.720 & 0.853 \\
+             & m & 0.789 & 0.746 & 0.254 & 0.815 & 0.855 \\
+\midrule
+Other (16)   & s & 0.901 & 0.889 & 0.111 & 0.935 & 0.888 \\
+             & m & 0.913 & 0.888 & 0.112 & 0.941 & 0.884 \\
+\midrule
+All (20)     & s & 0.865 & 0.840 & 0.160 & 0.892 & 0.880 \\
+             & m & 0.888 & 0.860 & 0.140 & 0.916 & 0.877 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:channels} groups the twenty classes by airframe family and shows
+where the s$\rightarrow$m step lands. On the sixteen non-fighter classes the
+step is close to nothing: mAP@0.5 moves $0.935\rightarrow0.941$, recall is flat
+($0.889\rightarrow0.888$), and the miss rate does not change. On the four
+fighter classes the same step cuts the miss rate from $0.358$ to $0.254$, a
+10.4-point reduction, and buys $+0.095$ mAP@0.5. The aggregate move of $+0.024$
+is therefore not a broad improvement that happens to be larger on fighters; it
+is a fighter-detection intervention averaged over twenty classes. Summing the
+per-class deltas, the four fighter classes account for $79\%$ of the aggregate
+gain and F-15 and F/A-18 alone for $72\%$.
+
+The precision column separates the channels further. Fighter precision rises
+overall ($0.722\rightarrow0.789$), but that average hides the class that does
+not improve, F-22, discussed below. What capacity did on the repaired classes
+was almost purely a recall effect: F-15 recall $0.521\rightarrow0.750$ and F/A-18
+recall $0.556\rightarrow0.731$, with precision rising in both cases because the
+new detections are correct when they are made. This is the signature of a
+detection-capacity limit, not an operating-point problem: the wider model does
+not merely lower its threshold, it finds aircraft the narrow model did not
+represent.
+
+\subsection{Detection-bound versus identity-bound classes}
 
 \begin{table}[t]
 \centering
 \caption{Per-class mAP@0.5 for the small and medium models on the 2{,}511-image
-validation split. Instances are validation instances. Rows sorted by medium-model
-accuracy.}
+validation split. Instances are validation instances. Rows sorted by
+medium-model accuracy. Precision and recall are those of the medium model at the
+default operating point.}
 \label{tab:perclass}
 \setlength{\tabcolsep}{4pt}
+\footnotesize
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
 Class & small & medium & $\Delta$ & $P$ & $R$ & Inst. \\
@@ -307,88 +433,82 @@ F-22   & 0.600 & 0.615 & $+0.015$ & 0.451 & 0.742 & 418 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:perclass} shows that the aggregate $+0.025$ is not spread across the
-class set. Fifteen of the twenty classes move by $0.03$ or less; the large
-multi-engine airframes are saturated at $0.98$--$0.99$ under both scales; and nearly
-the entire gain is carried by two fighter classes, F-15 ($0.617\rightarrow0.851$,
-$+0.234$) and F/A-18 ($0.840\rightarrow0.953$, $+0.113$). The mean over the four
-fighter classes rises from $0.720$ to $0.815$ while the mean over the remaining
-sixteen moves from $0.935$ to $0.941$. Doubling the backbone bought fighter-class
-recall and almost nothing else.
+Table~\ref{tab:perclass} shows the same step class by class. Fifteen of the
+twenty classes move by $0.03$ or less; the large multi-engine airframes are
+saturated at $0.98$--$0.99$ under both scales; and the concentration is entirely
+on fighters. The mean over the four fighter classes rises from $0.720$ to
+$0.815$ while the mean over the remaining sixteen moves from $0.935$ to $0.941$.
 
-This matters because the two improved classes and the one unchanged class fail in
-opposite ways. On the small model, F-15 had precision 0.723 with recall 0.521 and
-F/A-18 had precision 0.974 with recall 0.556: both were confident when they fired and
-simply failed to fire often enough. The medium model lifts F-15 to 0.906/0.750 and
-F/A-18 to 0.986/0.731, i.e.\ it repairs the recall deficit directly, and F-15's
-mAP@0.5:0.95 gain ($0.533\rightarrow0.735$), so the boxes are also better localised
-rather than merely more numerous: both metrics improve by the same proportion
-(about $38\%$), which is what one expects if localisation quality scales with the
-number of correctly found instances.
+The two improved classes and the one unchanged class fail in opposite ways. On
+the small model, F-15 had precision 0.723 with recall 0.521 and F/A-18 had
+precision 0.974 with recall 0.556: both were confident when they fired and
+simply failed to fire often enough. The medium model lifts F-15 to 0.906/0.750
+and F/A-18 to 0.986/0.731, repairing the recall deficit directly. F-15's
+mAP@0.5:0.95 gain ($0.533\rightarrow0.735$) keeps pace with its mAP@0.5 gain, so
+the boxes are better localised as well as more numerous; both metrics improve by
+about $38\%$, which is what one expects if the same fraction of newly found
+instances is localised about as well as the old ones.
 
 F-22 behaves differently. It moves from 0.600 to 0.615, and its precision
 \emph{falls} from 0.493 to 0.451 while recall rises from 0.687 to 0.742. More
 capacity made it more willing to assert a class it cannot resolve: the additional
-parameters buy detections that are then assigned to the wrong twin-tail fighter. This
-is the signature of an identity limit rather than a detection limit. Consistent with
-that, SU-24 loses $0.059$ through a recall drop ($0.877\rightarrow0.706$) with
-precision rising to 0.980, and E-3 loses $0.030$ through precision
-($0.939\rightarrow0.824$) with recall at 0.994. Both remain above 0.85, but the wider
-model appears to shift some capacity away from these classes toward the fighters.
+parameters buy detections that are then assigned to the wrong twin-tail fighter.
+This is the signature of an identity limit rather than a detection limit, and it
+is the paper's central negative result. It is not an instance-count artefact:
+across the twenty classes, validation instance count correlates weakly with
+medium-model mAP@0.5 ($r=0.27$, $r^2=0.07$) and not at all with small-model
+mAP@0.5 ($r=-0.06$). F-22 has 418 validation instances and scores 0.615, while
+TU-160 has 334 and scores 0.978. What separates them is the discriminability of
+the planform at this ground sample distance, not the amount of supervision.
 
-We therefore read the outcome as follows. The residual error of the small model is
-\emph{two} phenomena, and aggregate mAP conflates them: failing to \emph{find} an
-airframe, which is capacity-bound and was fixed by the medium backbone, and failing to
-\emph{identify} it, which is not and was not. Class instance count is a weak predictor
-of which case applies ($r=0.27$, $r^{2}=0.07$ across the twenty classes): F-22 has 418
-validation instances and scores 0.615, while TU-160 has 334 and scores 0.978. What
-separates them is the discriminability of the planform at this ground sample distance,
-not the amount of supervision available.
+Capacity is also not free per class. SU-24 loses $0.059$ through a recall drop
+($0.877\rightarrow0.706$) with precision rising to 0.980, and E-3 loses $0.030$
+through precision ($0.939\rightarrow0.824$) with recall at 0.994. Both remain
+above 0.85, but the wider model appears to shift some capacity away from these
+classes toward the fighters. A single seed cannot separate reallocation from
+noise here, which is why we report it as an open question rather than as a
+finding.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_curves.png}
-\caption{Training and validation curves for the medium-scale run. Best validation
-fitness occurs at epoch 42 and is not challenged for the following 60 epochs, at
-which point early stopping terminates the run. The last 60 epochs form a plateau, not
-a degradation.}
-\label{fig:curves}
-\end{figure}
+Read together, the two tables separate the residual error of the small model into
+two phenomena that aggregate mAP conflates: failing to \emph{find} an airframe,
+which is capacity-bound and was substantially fixed by the medium backbone, and
+failing to \emph{identify} it, which is not and was not.
 
-\subsection{Training cost and latency}
-Per-epoch cost is 17.1~s (nano), 26.9~s (small) and 27.5~s (medium). The medium run
-does not run faster per epoch than the small single-card run despite twice the
-silicon: it is roughly twice the parameters and 3.3 times the FLOPs, so the second
-card approximately pays for the extra depth rather than adding throughput, and the
-per-step gradient all-reduce consumes part of what remains. The nano run is
-loader-bound, with the GPU busy about half the time; sizing its batch to the model
-would have halved its wall clock without changing the effective batch, since the
-nominal batch is absorbed by gradient accumulation.
+\subsection{The localisation channel is scale-invariant}
+The third channel behaves differently again. Retention $\rho$ is $0.880$ for the
+small model and $0.877$ for the medium one, a change of $0.003$; within the
+fighter block it is $0.853$ and $0.855$, and within the non-fighter block $0.888$
+and $0.884$. Capacity does not change the fraction of detection-level accuracy
+that survives strict IoU, in any group. Whatever error localisation contributes
+at IoU 0.5 survives the doubling essentially untouched, and its share is
+slightly larger for fighters than for the rest, consistent with their smaller
+and less distinctive extents.
 
-Inference at $1024$~px and batch 1 costs 4.0~ms for the small model and 9.5~ms for the
-medium one, of which preprocessing is 1.1~ms and postprocessing 0.8~ms in the former
-case. Postprocessing is cheap in absolute terms because suppression has been removed
-from the pipeline; with suppression, cost would scale with the number of boxes and
-would dominate on dense aprons. The medium model therefore costs 2.4 times the small
-model's latency for $+0.025$ mAP@0.5, which is the central trade-off for deployment.
+This is a strong statement about what scaling does \emph{not} buy. A larger
+backbone improves strict-IoU mAP in proportion to how many more instances it
+finds, not by producing tighter oriented boxes. If the operational requirement is
+strict-IoU accuracy or heading precision, the lever is input resolution or an
+explicit oriented refinement stage, not parameters. Reporting only
+mAP@0.5:0.95 hides this, because that number rises with capacity for the same
+reason mAP@0.5 does.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_pred.jpg}
-\caption{Validation predictions on a mixed Russian-fighter apron (ground truth left,
-predictions right). Nine SU-24, four SU-34 and three SU-35 are detected with no false
-positives and no misclassifications at IoU 0.5, illustrating the medium model's
-behaviour on the classes where orientation and separation matter most.}
-\label{fig:pred}
-\end{figure}
+\subsection{What repairing a channel costs}
+The medium run costs roughly twice the parameters and 3.3 times the FLOPs of the
+small one, and does not run faster per epoch (27.5~s versus 26.9~s) despite
+twice the silicon: the second card pays for the extra depth rather than adding
+throughput, and the per-step gradient all-reduce takes part of what remains. At
+$1024$~px and batch 1, inference costs 4.0~ms for the small model and 9.5~ms for
+the medium one, of which preprocessing is 1.1~ms and postprocessing 0.8~ms in
+the former case. Postprocessing is cheap because suppression has been removed;
+with suppression it would scale with the number of boxes and dominate on dense
+aprons.
 
-\subsection{Qualitative behaviour}
-Fig.~\ref{fig:pred} shows a typical dense result. Oriented boxes follow airframe
-heading, so adjacent aircraft in a row remain separable with no suppression step.
-Across the full validation split, predictions were scored class-aware against labels
-at IoU 0.5: mean per-image F1 is 0.856, and 57.7\% of frames are error-free at that
-threshold. The 111 frames with no true positive at all are dominated by the
-precision-limited fighter classes discussed above.
+The medium model therefore costs 2.4 times the small model's latency. Bought as
+a single aggregate, that is $+0.025$ mAP@0.5; bought as a failure-mode repair,
+it is $+0.095$ on the fighter block and $+0.006$ on the sixteen classes that
+were already found and named. A deployment that mostly sees transports and
+tankers is paying 2.4 times the latency for a channel it does not have a problem
+in, which is the practical consequence of treating mAP as the decision variable.
 
 \section{Limitations}
 \label{sec:limits}
@@ -397,23 +517,33 @@ precision-limited fighter classes discussed above.
 bit-identical results across GPU counts: distributed training averages batch-norm
 statistics across devices, and kernel selection differs. Fourth-decimal agreement
 between the training loop and the standalone validation pass (0.9160/0.8003 versus
-0.916/0.801) is the expected level of agreement, not a guarantee.
+0.916/0.801) is expected, not guaranteed.
+
+\emph{One run per rung.} The channel decomposition is a two-point comparison
+because per-class validation output was retained only for the small and medium
+runs; nano contributes aggregate metrics alone. Each step is a single
+observation, and the SU-24 and E-3 regressions are not separable from seed noise
+with the runs available.
+
+\emph{Operational taxonomy.} The three channels are inferred from the geometry of
+precision, recall, and IoU retention, not assigned per instance. A TIDE-style
+analysis \cite{bolya2020} over saved predictions would give exact error counts
+and would let a duplicate-detection channel be separated from identity confusion;
+we did not run it, so the taxonomy should be read as a diagnostic summary rather
+than a complete error budget.
 
 \emph{Latency provenance.} All timings are from the training GPU, not from an edge
-device, and include no thermal or power constraint. They are useful for ranking the
-scales against each other and should not be quoted as deployment figures.
+device, and include no thermal or power constraint. They are useful for ranking
+the scales against each other and should not be quoted as deployment figures.
 
-\emph{Compute budget.} The ladder stops at the medium backbone because that is the
-largest model trainable at $1024$~px with the resources available: the medium run
-already needed two 48~GB accelerators at $16$ images per card, and the small model
-exceeded 25~GB on a single card at the same resolution and total batch. Extending the
-ladder to the large and extra-large variants of the family is therefore a question of
-hardware rather than of patience. At this input resolution and batch size they exceed
-what a pair of L40S cards can hold, and would need accelerators with substantially
-more memory---an H200-class device (141~GB of HBM), or a multi-node cluster with
-sharded or checkpointed training---plus proportionally more compute time and power.
-The medium rung should be read as an accuracy ceiling for this setting, not as the
-ceiling of the architecture family.
+\emph{Compute budget.} The ladder stops at the medium backbone because it is the
+largest model trainable at $1024$~px with the resources available: it already
+needed two 48~GB accelerators at $16$ images per card, and the small model
+exceeded 25~GB on a single card at the same resolution and total batch. The large
+and extra-large variants would need H200-class memory (141~GB of HBM) or
+multi-node sharded training, plus proportionally more compute and power, so the
+medium rung is an accuracy ceiling for this setting, not for the architecture
+family.
 
 \section{Conclusion}
 \label{sec:concl}
@@ -421,27 +551,29 @@ ceiling of the architecture family.
 A single training recipe at $1024$~px with full rotation augmentation, applied to
 three backbone scales of YOLO26-OBB on MAR20, produces a monotonic accuracy ladder
 ending at mAP@0.5 of 0.916 and mAP@0.5:0.95 of 0.801, with a converged level of
-0.889/0.779. Per-class analysis shows that the doubling from small to medium is
-almost entirely a fighter-recall intervention: two classes gain 0.11 and 0.23 while
-fifteen of the remaining eighteen move by 0.03 or less and the large airframes are saturated. The one class
-that more capacity did not help, and slightly harmed in precision, is a twin-tail
-planform that the sensor cannot separate from its siblings at this ground sample
-distance.
+0.889/0.779. The ladder is not the contribution. The contribution is what the
+ladder reveals when the error is decomposed: $79\%$ of the aggregate gain comes
+from four fighter classes, capacity cuts their miss rate by 10.4 points, while
+the identity-limited class does not respond and the localisation share of error
+is unchanged across a doubling of parameters.
 
-Two conclusions follow for practice. First, aggregate mAP is an inadequate summary
-for this benchmark, because the interesting dynamics are confined to four of twenty
-classes and differ in kind between them. Second, the useful question when scaling a
-detector is not how much accuracy a larger backbone buys but which error mode it
-buys it from; here that mode was detection, and the identity mode remained.
+Two conclusions follow for practice. First, aggregate mAP is an inadequate
+summary for this benchmark and, we suspect, for fine-grained oriented detection
+generally, because the dynamics are confined to a minority of classes and differ
+in kind between them. Second, the useful question when scaling is not how much
+accuracy a larger backbone buys but which error channel it buys it from, and
+whether that is the channel the deployment suffers in. The three-signature
+diagnostic (precision, recall, strict-IoU retention) is cheap enough to report
+alongside any capacity study and would make those studies comparable in a way
+mAP alone does not.
 
-Future work is in three directions: quantifying accuracy under FP16 and INT8
-TensorRT on an 8~GB embedded module, where shared memory rather than compute is the
-binding constraint; repeating the ladder across seeds to convert the two steps into
-distributions; and attacking the identity-limited class with hard-negative mining
-against the other twin-tail fighters or an upstream crop-and-reclassify stage. A
-fourth rung at the large scale is the obvious extension and the one we cannot report
-here: at $1024$~px it needs H200-class memory or multi-node training, so it belongs
-to a cluster budget rather than a two-card one.
+Future work is in three directions: quantising to FP16 and INT8 TensorRT on an
+8~GB embedded module, where shared memory rather than compute binds; repeating
+the ladder across seeds to convert the two steps into distributions; and
+attacking the identity-limited class with hard-negative mining against the other
+twin-tail fighters or an upstream crop-and-reclassify stage. A fourth rung at the
+large scale would need H200-class memory or multi-node training at this
+resolution, so it belongs to a cluster budget rather than a two-card one.
 
 \section*{Acknowledgment}
 The author thanks the maintainers of the MAR20 benchmark and of the Ultralytics
@@ -490,6 +622,15 @@ feature refinement for rotating object,'' in \emph{Proc. AAAI Conf. Artif. Intel
 \bibitem{yu2021mar20}
 W. Yu, X. Sun, K. Yang, Y. Rui, and H. Lin, ``MAR20: A benchmark for military
 aircraft recognition in remote sensing images,'' \emph{J. Radars}, 2021.
+
+\bibitem{hoiem2012}
+D. Hoiem, Y. Chodpathumwan, and Q. Dai, ``Diagnosing error in object detectors,''
+in \emph{Proc. Eur. Conf. Comput. Vis. (ECCV)}, 2012, pp. 340--353.
+
+\bibitem{bolya2020}
+D. Bolya, S. Foley, J. Hays, and J. Hoffman, ``TIDE: A general toolbox for
+identifying object detection errors,'' in \emph{Proc. Eur. Conf. Comput. Vis.
+(ECCV)}, 2020, pp. 558--573.
 
 \bibitem{tan2019efficientnet}
 M. Tan and Q. Le, ``EfficientNet: Rethinking model scaling for convolutional neural
